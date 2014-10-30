@@ -52,6 +52,8 @@
 ;; Locally nameless stuff
 (struct Scope (t) #:transparent)
 
+#||#
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Binding/naming operations
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -148,6 +150,12 @@
        [(TVariant: name ts r c) (mk-TVariant name (map abs* ts) r c)]
        [(TMap: t-dom t-rng ext) (mk-TMap (abs* t-dom) (abs* t-rng) ext)]
        [(TSet: t ext) (mk-TSet (abs* t) ext)]))))
+;; Abstract inside-out.
+(define (quantify-frees t names)
+  (match names
+    ['() t]
+    [(cons name names)
+     (abstract-frees (mk-TΛ (abstract-free t name)) names)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Type operations (memoizes results in type-rep)
@@ -264,8 +272,9 @@
               [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
            [_ t]))))
 
-(define (<:? Γ τ σ) ((<:?-aux Γ) ∅ τ σ))
-(define ((<:?-aux Γ) A τ σ) ;; TODO: use axiom rules
+(define (<:? L τ σ)
+  ((<:?-aux (Language-user-spaces L) #f) ∅ τ σ))
+(define ((<:?-aux Γ E<:) A τ σ) ;; TODO: use axiom rules
   (let <:?-aux ([A A] [τ τ] [σ σ])
        (define-syntax seq-<:
          (syntax-rules ()
@@ -316,16 +325,16 @@
            [(_ (? needs-resolve?)) (<:?-aux (grow-A) τ (resolve σ Γ))]
            [(_ _) #f])])))
 
-(define (type-join LΓ τ σ)
-  (cond [(<:? LΓ τ σ) σ]
-        [(<:? LΓ σ τ) τ]
+(define (type-join L τ σ)
+  (cond [(<:? L τ σ) σ]
+        [(<:? L σ τ) τ]
         [else
          (match* (τ σ)
            [((TVariant: n τs tr tc) (TVariant: n σs tr tc)) ???]
            [((TΛ: x (Scope t)) (TΛ: _ (Scope s))) ???]
            ;; boilerplate
            ;;[(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?)) t]
-           [(TSUnion: ts) ???]
+           [((TSUnion: ts) _) ???]
            [(TRUnion: ts) ???]
            [(TMap: t-dom t-rng ext) ???]
            [((TSet: t ext) (TSet: s ext)) ???]
@@ -333,7 +342,84 @@
            [(Tμ: x (Scope t) r c n) ???]
            [(TCut: t u) ???]
            [(_ _) (*TRUnion (list τ σ))])]) (error 'type-join "Todo"))
-(define (type-meet LΓ τ σ) (error 'type-meet "Todo"))
+
+(define (type-meet L τ σ)
+  (cond [(<:? L τ σ) τ]
+        [(<:? L σ τ) σ]
+        [else
+         (match* (τ σ)
+           [(_ _) (error 'type-meet "Todo")])]))
+
+(define (castable L from to)
+  (define us (Language-user-spaces L))
+  (let check ([from from] [to to])
+    (or (<:? L from to) ;; upcast
+        (T⊤? from)
+        (match* (from to)
+          [((TΛ: _ (Scope f)) (TΛ: _ (Scope t)))
+           (check f t)]
+          [((TVariant: n tsf tr tc) (TVariant: n tst tr tc))
+           (let all ([tsf tsf] [tst tst])
+             (match* (tsf tst)
+               [('() '()) #t]
+               [((cons f tsf) (cons t tst))
+                (and (check f t) (all tsf tst))]
+               [(_ _) #f]))]
+          [((Tμ: _ (Scope f) r c n) (Tμ: _ (Scope t) r c n))
+           (check f t)]
+          [((TMap: df rf) (TMap: dt rt))
+           (and (check df dt)
+                (check rf rt))]
+          [((TSet: f) (TSet: t)) (check f t)]
+          [((TSUnion: tsf) _) (error 'castable "Todo: unions")]
+          [(_ (TSUnion: tst)) (error 'castable "Todo: unions")]
+          [((and (not (? Tμ?)) (? needs-resolve?)) _)
+           (check (resolve from us) to)]
+          [(_ (and (not (? Tμ?)) (? needs-resolve?)))
+           (check from (resolve to us))]
+          [(_ _) #f]))))
+
+;; Find all instances of variants named n with given arity, and return
+;; their type, additionally quantified by all the containing Λs.
+(define (lang-variants-of-arity L n arity)
+  (define us (Language-user-spaces L))
+  (for/fold ([found '()])
+      ([τ (in-hash-values us)])
+    (let collect ([τ τ] [TVs '()] [found fould] [μs ∅eq] [names ∅eq])
+      (define (collect* τs found)
+        (match τs
+          ['() found]
+          [(cons τ τs)
+           (define found* (collect τ TVs found μs names))
+           (collect* τs found*)]))
+      (match τ
+        [(TVariant: n* ts tr tc)
+         (define found*
+           (if (and (eq? n n*)
+                    (= arity (length ts)))
+               (cons (quantify-frees TVs τ) found)
+               found))
+         (collect* ts found*)]
+        [(TΛ: x s)
+         (define x* (gensym x))
+         (define TVs* (cons x* TVs))
+         (collect (open-scope s (mk-TFree x* #f)) TVs* found μs names)]
+        [(TName: x _)
+         (if (set-member? names x)
+             found
+             (collect (hash-ref us x) TVs found μs (set-add names x)))]
+        [(Tμ: x s)
+         (if (set-member? μs τ)
+             found
+             (collect (open-scope s τ) TVs found (set-add μs τ) names))]
+        [(? TCut?) (collect (resolve τ us) TVs found μs names)]
+        [(TMap: d r _)
+         (collect r TVs
+                  (collect d TVs found μs names)
+                  μs names)]
+        [(TSet: v) (collect v TVs found μs names)]
+        [(or (TRUnion: ts) (TSUnion: ts)) (collect* ts found)]
+        [_ found]))))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

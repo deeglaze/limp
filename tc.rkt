@@ -27,42 +27,96 @@
 
 (define (cast-to τ σ) (error 'cast-to "Todo"))
 
-(define (coerce-check-expect LΓ ct expect τ)
+(define (coerce-check-expect L ct expect τ)
   (match ct
     [(Cast σ)
      (define σ* (cast-to τ σ))
-     (unless (if expect (<:? LΓ σ* expect) #t)
+     (unless (if expect (<:? L σ* expect) #t)
        (type-error "Expected ~a, got ~a" expect τ))
      (or expect σ*)]
     [(Check σ)
-     (unless (<:? LΓ τ σ)
+     (unless (<:? L τ σ)
        (type-error "Expect ~a to be a subtype of ~a" τ σ))
-     (unless (if expect (<:? LΓ τ expect) #t)
+     (unless (if expect (<:? L τ expect) #t)
        (type-error "Expected ~a, got ~a" expect τ))
      (or expect σ)]))
 
 ;; Repeatedly instantiate σ's Λs with τs until τs is empty.
 ;; If τs not empty before σ is not a Λ, then invoke on-too-many.
-(define (repeat-inst LΓ σ τs
+(define (repeat-inst L σ τs
                      [on-too-many
                       (λ () (error 'repeat-inst
                                    "Instantiated type with too many variables: ~a (~a)" σ τs))])
   (let loop ([σ σ] [τs τs])
     (match τs
       [(cons τ τs)
-       (match (resolve σ LΓ)
+       (match (resolve σ (Language-user-spaces L))
          [(TΛ: x s)
           (loop (open-scope s τ) τs)]
          [_ (on-too-many)])]
       [_ σ])))
 
-;; LΓ : Language's space names ↦ Type,
+(define (tc-bu L Γ Ξ bu)
+  (define tc-expr* (tc-expr L Γ Ξ))
+  (match bu
+    [(Update k v)
+     (define kτ (tc-expr* k))
+     ;; We expect k to be a TAddr type, but which kind doesn't matter
+     (unless (TAddr? kτ)
+       (type-error "Expect store lookup key to have an address type, got ~a" kτ))
+     ;; for effect
+     (tc-expr* v)
+     Γ]
+    [(Where pat e)
+     ;; We expect e and pat to have overlapping types,
+     ;; but one's type doesn't drive the other's checking.
+     (define eτ (tc-expr* e))
+     (define-values (Γ* pτ) (tc-pattern L Γ Ξ pat))
+     (define overlap? (type-overlap? eτ pτ))
+     (unless overlap?
+       (printf "Where clause has non-overlapping pattern and expression types: ~a" bu))
+     Γ*]))
+
+(define (tc-pattern L Γ Ξ pat expect-overlap)
+  (match pat
+    [(PAnd ct ps) ???]
+    [(PName ct x) ???]
+    [(PWild ct) ???]
+    [(PVariant ct n ps) ???]
+    [(PMap-with ct k v p) ???]
+    [(PMap-with* ct k v p) ???]
+    [(PSet-with ct v p) ???]
+    [(PSet-with* ct v p) ???]
+    [(PTerm ct t) ???]
+    [(PIsExternal ct) ???]
+    [(PIsAddr ct) ???]
+    [(PIsType ct) ???]
+    [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
+
+(define (tc-bus L Γ Ξ bus)
+  (let all ([Γ Γ] [bus bus])
+    (match bus
+      ['() Γ]
+      [(cons bu bus)
+       (define Γ* (tc-bu Γ Ξ bu))
+       (all Γ* bus)])))
+
+(define (check-and-join-rules L Γ Ξ rules expect-discr expected)
+  (let check ([rules rules] [τ T⊥])
+   (match rules
+     ['() τ]
+     [(cons (Rule _ lhs rhs bus) rules)
+      (define-values (Γ* lhs-τ) (tc-pattern L Γ Ξ lhs expect-discr))
+      (define Γ** (tc-bus L Γ* Ξ bus))
+      (check rules (type-join τ ((tc-expr L Γ** Ξ) rhs expected)))])))
+
+;; L : Language,
 ;; Γ : Variable names ↦ Type,
 ;; Ξ : metafunction names ↦ Type,
 ;; e : expr
 ;; Output is expression's type.
-(define ((tc-expr LΓ Γ Ξ) e [expected #f])
-  (let tc-expr ([e e] [expected expected])
+(define ((tc-expr L Γ Ξ) e [expected #f])
+  (let tc-expr* ([e e] [expected expected])
     (define ct (Typed-ct e))
     (define (project-check pred form ty)
       (define σ
@@ -77,7 +131,7 @@
         [(ECall _ mf τs es)
          (define mfτ (hash-ref Ξ mf (unbound-mf 'tc-expr mf)))
          ;; instantiate with all given types, error if too many
-         (define inst (repeat-inst LΓ mfτ τs))
+         (define inst (repeat-inst L mfτ τs))
          ;; also error if too few
          (when (TΛ? inst)
            (type-error
@@ -87,7 +141,7 @@
          (match-define (TArrow (TVariant: _ σs _ _) rng) inst)
          (for ([se (in-list es)]
                [σ (in-list σs)])
-           (tc-expr se σ))
+           (tc-expr* se σ))
          rng]
 
         [(EVariant _ n τs es)
@@ -96,7 +150,7 @@
          (define possible-σs (lang-variants-of-arity L n arity))
          (for/fold ([τ T⊥])
              ([σ (in-list possible-σs)])
-           (define vσ (let/ec break (repeat-inst LΓ σ τs (λ () (break #f)))))
+           (define vσ (let/ec break (repeat-inst L σ τs (λ () (break #f)))))
            (match vσ
              [#f τ]
              [(TVariant: _ σs _ _) ;; We know |σs| = |es| by possible-σs def.
@@ -105,16 +159,16 @@
                     (parameterize ([type-error-fn (λ _ (break #f))])
                       (for ([σ (in-list σs)]
                             [e (in-list es)])
-                        (tc-expr e σ))))
+                        (tc-expr* e σ))))
                   ;; good, then it could be vσ too.
-                  (type-join LΓ τ vσ)
+                  (type-join L τ vσ)
                   ;; well then it's not vσ.
                   τ)]))]
 
         [(ERef _ x) (hash-ref Γ x (unbound-pat-var 'tc-expr x))]
       
         [(EStore-lookup _ k _) ;; lookup mode does not factor into type.
-         (define kτ (tc-expr k))
+         (define kτ (tc-expr* k))
          ;; We expect k to be a TAddr type, but which kind doesn't matter
          (unless (TAddr? kτ)
            (type-error "Expect store lookup key to have an address type, got ~a" kτ))
@@ -124,17 +178,17 @@
          (project-check TAddr? "alloc" "address")]
 
         [(ELet _ bus body)
-         (with-tc-bus Γ Ξ (λ (Γ Ξ) (tc-expr body expected)))]
+         ((tc-expr L (tc-bus L Γ Ξ bus) Ξ) body expected)]
 
         [(EMatch _ de rules)
-         (define dτ (tc-expr de))
-         (check-and-join-rules Γ Ξ rules expected)]
+         (define dτ (tc-expr* de))
+         (check-and-join-rules Γ Ξ rules dτ expected)]
 
         [(EExtend _ m k v)
-         (define mτ (tc-expr m))
-         (define kτ (tc-expr k))
-         (define vτ (tc-expr v))
-         (type-join LΓ mτ (mk-TMap kτ vτ #f))]
+         (define mτ (tc-expr* m))
+         (define kτ (tc-expr* k))
+         (define vτ (tc-expr* v))
+         (type-join L mτ (mk-TMap kτ vτ #f))]
 
         [(EEmpty-Map _) (project-check TMap? "empty-map" "map")]
 
@@ -142,14 +196,14 @@
 
         [(ESet-union _ es)
          (for/fold ([τ T⊥]) ([e (in-list es)])
-           (type-join LΓ τ (tc-expr e expected)))]
+           (type-join L τ (tc-expr* e expected)))]
 
         [(ESet-intersection _ e es)
          (error 'tc-expr "Todo: set-intersect")
          #;
          (for/fold ([τ (tc-expr e)])
              ([e (in-list es)])
-           (type-meet LΓ τ (tc-expr e)))]
+           (type-meet L τ (tc-expr e)))]
 
         [(ESet-subtract _ e es) (error 'tc-expr "Todo: set-subtract")]
         [(ESet-member _ e v) (error 'tc-expr "Todo: set-member?")]
@@ -157,4 +211,4 @@
         [(EMap-has-key _ m k) (error 'tc-expr "Todo: map-has-key?")]
         [(EMap-remove _ m k) (error 'tc-expr "Todo: map-remove")]
         [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
-    (coerce-check-expect LΓ ct expect pre-τ)))
+    (coerce-check-expect L ct expect pre-τ)))

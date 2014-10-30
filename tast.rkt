@@ -26,6 +26,23 @@ and semantics.
 (struct PIsExternal Pattern () #:transparent)
 (struct PIsAddr Pattern () #:transparent)
 (struct PIsType Pattern () #:transparent)
+#|
+Template:
+ (match pat
+    [(PAnd ct ps) ???]
+    [(PName ct x) ???]
+    [(PWild ct) ???]
+    [(PVariant ct n ps) ???]
+    [(PMap-with ct k v p) ???]
+    [(PMap-with* ct k v p) ???]
+    [(PSet-with ct v p) ???]
+    [(PSet-with* ct v p) ???]
+    [(PTerm ct t) ???]
+    [(PIsExternal ct) ???]
+    [(PIsAddr ct) ???]
+    [(PIsType ct) ???]
+    [_ (error who "Unsupported pattern: ~a" pat)])
+|#
 
 ;; Elaborated Terms
 (struct Term Typed () #:transparent)
