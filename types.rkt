@@ -1,19 +1,59 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/syntax racket/base)
-         racket/list racket/match racket/set
+         racket/list racket/match racket/set (only-in racket/function curry)
          racket/trace
-         "common.rkt")
+         "common.rkt" "language.rkt")
 (provide (all-defined-out))
 
 (struct addrize ()) (define -addrize (addrize))
 
-;; Type representations
-;; We'll want something like rep-utils later to intern types and check equality faster?
-(struct Type (key support free quality mono?) #:mutable #:transparent
+(define type-print-verbosity (make-parameter 0))
+(define (type->sexp t)
+  (define v (type-print-verbosity))
+  (let rec ([t t])
+    (match t
+      [(or (TFree: _ x taddr) (TName: _ x taddr))
+       (if (and (> v 1) taddr)
+           `(ref$ ,x ,(rec taddr))
+           x)]
+      [(or (and (Tμ: _ x st _ _ _) (app (λ _ 'μ) head))
+           (and (TΛ: _ x st) (app (λ _ 'Λ) head)))
+       `(,head ,x ,(rec (open-scope-hygienically st x)))]
+       [(TVariant: _ name ts tr tc)
+       (define base (cons name (map rec ts)))
+       (if (> v 0)
+           (append base (list (format "b?: ~a tc?: ~a" tr tc)))
+           base)]
+      [(or (and (TSUnion: _ ts) (app (λ _ '∪) head))
+           (and (TRUnion: _ ts) (app (λ _ 'raw∪) head))
+           (app (match-lambda [(TMap: _ d r _) (list '↦ d r)]
+                              [(TSet: _ s _) (list '℘ s)]
+                              [_ #f]) (cons head ts)))
+       `(,head . ,(map rec ts))]
+      [(TCut: _ s u)
+       (list (rec s) (rec u))]
+      [(? T⊤?) '⊤]
+      [(TAddr: _ name mm em imp?) `(Addr ,name ,mm ,em ,imp?)]
+      [(TExternal: _ name) name]
+      [(TUnif τ) `(Unif$ ,(rec τ))]
+      [(TArrow: _ dom rng) `(-> ,(rec dom) ,(rec rng))]
+      [(TBound: _ i taddr) `(deb$ ,i)]
+      [_ `(Unknown$ ,(struct->vector t))])))
+
+
+(define (write-type t port mode)
+  (display (type->sexp t) port))
+
+;; Type representations are structurally unique by an intern key.
+;; Various properties are memoized: support, free vars, quality and monomorphic?
+(struct Type (key support free quality mono? stx) #:mutable #:transparent
         #:methods gen:equal+hash
         [(define (equal-proc t0 t1 rec) (eqv? (Type-key t0) (Type-key t1)))
          (define (hash-proc t rec) (rec (Type-key t)))
-         (define (hash2-proc t rec) (rec (Type-key t)))])
+         (define (hash2-proc t rec) (rec (Type-key t)))]
+        #:property prop:custom-print-quotable 'never
+        #:methods gen:custom-write
+        [(define write-proc write-type)])
 (define intern-table (make-hash))
 (define-syntax (define-type stx)
   (syntax-parse stx
@@ -22,37 +62,53 @@
      (define/with-syntax name: (format-id #'name "~a:" #'name))
      #`(begin #,(syntax/loc stx (struct name Type fields #:transparent))
               #,(syntax/loc stx
-                  (define (mk-name . fields)
+                  (define (mk-name syn . fields)
                     (hash-ref! intern-table (list 'name . fields)
-                               (λ () (name (hash-count intern-table) #f #f #f 'unset . fields)))))
+                               (λ () (name (hash-count intern-table) #f #f #f 'unset syn . fields)))))
               #,(syntax/loc stx
                  (define-match-expander name:
-                   (syntax-rules () [(_ . fields) (name _ _ _ _ _ . fields)]))))]))
+                   (syntax-rules () [(_ syn . fields) (name _ _ _ _ _ syn . fields)]))))]))
 (struct base-T⊤ Type () #:transparent)
-  (define T⊤ (base-T⊤ 0 ∅eq ∅eq 'abstract #t))
+  (define T⊤ (base-T⊤ 0 ∅eq ∅eq 'abstract #t #f))
   (hash-set! intern-table '(T⊤) T⊤)
   (define (T⊤? x) (eq? T⊤ x))
 (define-type TSUnion (ts))
-  (define T⊥ (TSUnion 1 ∅eq ∅eq 'concrete #t '()))
+  (define T⊥ (TSUnion 1 ∅eq ∅eq 'concrete #t #f '()))
   (hash-set! intern-table '(T⊥) T⊥)
+  (define (T⊥? x) (eq? T⊥ x))
 (define-type TRUnion (ts))
 (define-type TVariant (name ts trust-rec trust-con))
 (define-type TExternal (name))
 (define-type Tμ (x st r c n)) ;; name for printing
 (define-type TΛ (x st))
 (define-type TCut (t u))
-(define-type TFree (x taddr))
-(define-type TBound (i taddr))
 (define-type TName (x taddr)) ;; top level interaction and letrec-like binding
 (define-type TMap (t-dom t-rng ext))
 (define-type TSet (t ext))
-(define-type TAddr (space mm em))
+(define-type TAddr (space mm em implicit?)) ;; We use implicit? to signal to mkV
 ;; First order function
 (define-type TArrow (dom rng))
-;; Locally nameless stuff
+;; Locally nameless stuff. References have their address target post-abstraction.
 (struct Scope (t) #:transparent)
+(define-type TFree (x taddr))
+(define-type TBound (i taddr))
+;; Unification variable
+(struct TUnif ([τ #:mutable])
+        #:methods gen:custom-write [(define write-proc write-type)])
 
-#||#
+;; Canonicalize ⊥s
+(define (*TVariant sy name ts tr tc)
+  (if (ormap T⊥? ts)
+      T⊥
+      (mk-TVariant sy name ts tr tc)))
+(define (*TSet sy t ext)
+  (if (T⊥? t)
+      T⊥
+      (mk-TSet sy t ext)))
+(define (*TMap sy d r ext)
+  (if (or (T⊥? d) (T⊥? r))
+      T⊥
+      (mk-TMap sy d r ext)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Binding/naming operations
@@ -62,22 +118,23 @@
   (let open ([t* t*] [i 0])
     (define (open* t*) (open t* i))
     (match t*
-      [(TBound: i* taddr)
+      [(TBound: _ i* taddr)
        (if (= i i*)
            (if (eq? t -addrize)
                taddr
                t)
            t*)]
-      [(Tμ: x (Scope t) r c n) (mk-Tμ x (Scope (open t (add1 i))) r c n)]
-      [(TΛ: x (Scope t)) (mk-TΛ x (Scope (open t (add1 i))))]
+      [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (open t (add1 i))) r c n)]
+      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (open t (add1 i))))]
       ;; boilerplate
-      [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TName?)) t*]
-      [(TSUnion: ts) (*TSUnion (map open* ts))]
-      [(TRUnion: ts) (*TRUnion (map open* ts))]
-      [(TVariant: name ts r c) (mk-TVariant name (map open* ts) r c)]
-      [(TCut: t u) (mk-TCut (open* t) (open* u))]
-      [(TMap: t-odm t-rng ext) (mk-TMap (open* t-dom) (open* t-rng) ext)]
-      [(TSet: t ext) (mk-TSet (open* t) ext)])))
+      [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TName?) (? TUnif?)) t*]
+      [(TSUnion: sy ts) (mk-TSUnion sy (map open* ts))]
+      [(TRUnion: sy ts) (mk-TRUnion sy (map open* ts))]
+      [(TVariant: sy name ts r c) (mk-TVariant sy name (map open* ts) r c)]
+      [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [_ (error 'open "Bad type ~a" t*)])))
 
 ;; predictable name generation over gensym.
 (define (fresh-name supp base)
@@ -92,70 +149,96 @@
           numbered))]
    [else base]))
 
-(define ((name-conflict-res name on-conflict) f x t rec)
+(define ((name-conflict-res name on-conflict) f sy x t rec)
   (cond [(equal? x name)
          (when on-conflict (on-conflict))
-         (f (fresh-name (set-add (support t) x) x) (rec t))]
-        [else (f x (rec t))]))
+         (f sy (fresh-name (set-add (support t) x) x) (rec t))]
+        [else (f sy x (rec t))]))
 
 ;; for correct printing, sometimes clobbering old names
 (define (open-scope-hygienically s name [on-conflict #f])
   (match-define (Scope t*) s)
-  (define (conflict-res f x t) (name-conflict-res name on-conflict))
+  (define conflict-res (name-conflict-res name on-conflict))
   (let open ([t* t*] [i 0])
     (define (open* t*) (open t* i))
     (define (rec t) (Scope (open t (add1 i))))
     (match t*
-      [(TBound: i* taddr) (if (= i i*) (mk-TFree name taddr) t*)]
-      [(Tμ: x (Scope t) r c n) (conflict-res (λ (x s) (mk-Tμ x s r c n)) x t rec)]
-      [(TΛ: x (Scope t)) (conflict-res mk-TΛ x t rec)]
+      [(TBound: sy i* taddr) (if (= i i*) (mk-TFree sy name taddr) t*)]
+      [(Tμ: sy x (Scope t) r c n) (conflict-res (λ (x s) (mk-Tμ x s r c n)) x t rec)]
+      [(TΛ: sy x (Scope t)) (conflict-res mk-TΛ sy x t rec)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TName?)) t*]
-      [(TSUnion: ts) (mk-TSUnion (map open* ts))]
-      [(TRUnion: ts) (mk-TRUnion (map open* ts))]
-      [(TVariant: name ts r c) (mk-TVariant name (map open* ts) r c)]
-      [(TCut: t u) (mk-TCut (open* t) (open* u))]
-      [(TMap: t-dom t-rng ext) (mk-TMap (open* t-dom) (open* t-rng) ext)]
-      [(TSet: t ext) (mk-TSet (open* t) ext)])))
+      [(TSUnion: sy ts) (mk-TSUnion sy (map open* ts))]
+      [(TRUnion: sy ts) (mk-TRUnion sy (map open* ts))]
+      [(TVariant: sy name ts r c) (mk-TVariant sy name (map open* ts) r c)]
+      [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [_ (error 'open "Bad type ~a" t*)])))
 
 (define (subst-name t name s)
-  (define (conflict-res f x t) (name-conflict-res name #f))
+  (define conflict-res (name-conflict-res name #f))
   (let subst ([t t])
     (match t
-      [(TName: x _) (if (equal? x name) s t)]
-      [(Tμ: x (Scope t) r c n) (conflict-res (λ (x s) (mk-Tμ x s r c n)) x t subst)]
-      [(TΛ: x (Scope t)) (conflict-res mk-TΛ x t subst)]
+      [(TName: _ x _) (if (equal? x name) s t)]
+      [(Tμ: sy x (Scope t) r c n) (conflict-res (λ (x s) (mk-Tμ x s r c n)) sy t subst)]
+      [(TΛ: sy x (Scope t)) (conflict-res mk-TΛ sy x t subst)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TBound?)) t]
-      [(TSUnion: ts) (*TSUnion (map subst ts))]
-      [(TRUnion: ts) (*TRUnion (map subst ts))]
-      [(TVariant: name ts r c) (mk-TVariant name (map subst ts) r c)]
-      [(TCut: t u) (mk-TCut (subst t) (subst u))]
-      [(TMap: t-dom t-rng ext) (mk-TMap (subst t-dom) (subst t-rng) ext)]
-      [(TSet: t ext) (mk-TSet (subst t) ext)])))
+      [(TSUnion: sy ts) (mk-TSUnion sy (map subst ts))]
+      [(TRUnion: sy ts) (mk-TRUnion sy (map subst ts))]
+      [(TVariant: sy name ts r c) (mk-TVariant sy name (map subst ts) r c)]
+      [(TCut: sy t u) (mk-TCut sy (subst t) (subst u))]
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (subst t-dom) (subst t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (subst t) ext)]
+      [_ (error 'subst-name "Bad type ~a" t)])))
 
 (define (abstract-free t name)
   (Scope
    (let abs ([t t] [i 0])
      (define (abs* t) (abs t i))
      (match t
-       [(TFree: x taddr) (if (equal? x name) (mk-TBound i taddr) t)]
-       [(Tμ: x (Scope t) r c n) (mk-Tμ x (Scope (abs t (add1 i))) r c n)]
-       [(TΛ: x (Scope t)) (mk-TΛ x (Scope (abs t (add1 i))))]
+       [(TFree: sy x taddr) (if (equal? x name) (mk-TBound sy i taddr) t)]
+       [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (abs t (add1 i))) r c n)]
+       [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
        ;; boilerplate
-       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?)) t]
-       [(TSUnion: ts) (mk-TSUnion (map abs* ts))]
-       [(TRUnion: ts) (mk-TRUnion (map abs* ts))]
-       [(TCut: t u) (mk-TCut (abs* t) (abs* u))]
-       [(TVariant: name ts r c) (mk-TVariant name (map abs* ts) r c)]
-       [(TMap: t-dom t-rng ext) (mk-TMap (abs* t-dom) (abs* t-rng) ext)]
-       [(TSet: t ext) (mk-TSet (abs* t) ext)]))))
-;; Abstract inside-out.
-(define (quantify-frees t names)
-  (match names
-    ['() t]
-    [(cons name names)
-     (abstract-frees (mk-TΛ (abstract-free t name)) names)]))
+       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TUnif?)) t]
+       [(TSUnion: sy ts) (mk-TSUnion sy (map abs* ts))]
+       [(TRUnion: sy ts) (mk-TRUnion sy (map abs* ts))]
+       [(TCut: sy t u) (mk-TCut sy (abs* t) (abs* u))]
+       [(TVariant: sy name ts r c) (mk-TVariant sy name (map abs* ts) r c)]
+       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
+       [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
+       [_ (error 'abstract-free "Bad type ~a" t)]))))
+
+;; Remove mutable unification variables.
+(define (freeze t)
+  (match t
+    [(TUnif τ) (freeze τ)]
+    ;; boilerplate
+    [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (freeze t)) r c n)]
+    [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (freeze t)))]
+    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?)) t]
+    ;; Resimplify, since unification may have bumped some stuff up.
+    [(TSUnion: sy ts) (*TSUnion sy (map freeze ts))]
+    [(TRUnion: sy ts) (*TRUnion sy (map freeze ts))]
+    [(TCut: sy t u) (mk-TCut sy (freeze t) (freeze u))]
+    [(TVariant: sy name ts r c) (*TVariant sy name (map freeze ts) r c)]
+    [(TMap: sy t-dom t-rng ext) (*TMap sy (freeze t-dom) (freeze t-rng) ext)]
+    [(TSet: sy t ext) (*TSet sy (freeze t) ext)]
+    [_ (error 'freeze "Bad type ~a" t)]))
+
+(define ff (cons #f #f))
+;; Abstract inside-out. Give cosmetic names for better readability and equality checking.
+(define (quantify-frees t names #:names [name-names #f] #:stxs [stxs #f])
+  (let rec ([t t] [names names] [nnames (or name-names names)] [stxs stxs])
+   (match names
+     ['() t]
+     [(cons name names*)
+      (match-define (cons name-name name-names*) nnames)
+      (match-define (cons stx0 stxs*) (or stxs ff))
+      (rec (mk-TΛ stx0 name-name (abstract-free t name)) names* name-names* stxs*)]
+     [_ (error 'quantify-frees "Expected a list of names ~a" names)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Type operations (memoizes results in type-rep)
@@ -164,12 +247,12 @@
 (define (support t)
   (or (Type-support t)
       (let ([t* (match t
-                  [(or (TSUnion: ts) (TRUnion: ts) (TVariant: _ ts _ _)
-                       (app (match-lambda [(or (TMap: d r _) (TCut: d r)) (list d r)]) ts)
-                       (app (match-lambda [(TSet: s _) (list s)]) ts))
+                  [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _)
+                       (app (match-lambda [(or (TMap: _ d r _) (TCut: _ d r)) (list d r)] [_ #f]) ts)
+                       (app (match-lambda [(TSet: _ s _) (list s)] [_ #f]) ts))
                    (for/union ([t (in-list ts)]) (support t))]
-                  [(or (TFree: x _) (TName: x _)) (seteq x)]
-                  [(or (Tμ: x (Scope t) _ _ _) (TΛ: x (Scope t)))
+                  [(or (TFree: _ x _) (TName: _ x _)) (seteq x)]
+                  [(or (Tμ: _ x (Scope t) _ _ _) (TΛ: _ x (Scope t)))
                    (set-add (support t) x)]
                   [_ ∅eq])])
         (set-Type-support! t t*)
@@ -178,49 +261,56 @@
 (define (free t)
   (or (Type-free t)
       (let ([t* (match t
-                  [(or (TSUnion: ts) (TRUnion: ts) (TVariant: _ ts _ _))
-                   (for/union ([t (in-list ts)]) (free t))]
-                  [(or (TMap: d r _) (TCut: d r))
+                  [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _))
+                   (for/unioneq ([t (in-list ts)]) (free t))]
+                  [(or (TMap: _ d r _) (TCut: _ d r))
                    (set-union (free d) (free r))]
-                  [(or (TFree: x _) (TName: x _)) (seteq x)]
-                  [(or (Tμ: _ (Scope t) _ _ _)
-                       (TΛ: _ (Scope t))
-                       (TSet: t _))
+                  ;; TName and TExternal are bound by language
+                  [(or (TFree: _ x _)) (seteq x)]
+                  [(or (Tμ: _ _ (Scope t) _ _ _)
+                       (TΛ: _ _ (Scope t))
+                       (TSet: _ t _))
                    (free t)]
                   [_ ∅eq])])
         (set-Type-free! t t*)
         t*)))
 
 (define (mono-type? t)
-  (define m (Type-mono? t))
-  (cond
-   [(eq? m 'unset)
-    (define b
-      (match t
-        [(or (TSUnion: ts) (TRUnion: ts) (TVariant: _ ts _ _)
-             (app (match-lambda [(or (TMap: d r _) (TCut: d r)) (list d r)]) ts))
-         (andmap mono-type? ts)]
-        [(or (Tμ: _ (Scope t) _ _ _)  (TSet: t _))
-         (mono-type? t)]
-        [(? TΛ?) #f]
-        [(TName: x _) (error 'mono-type? "Todo: interaction with top level type defs")]
-        [_ #t]))
-    (set-Type-mono?! t b)
-    b]
-   [else m]))
+  (let coind ([A ∅eq] [t t])
+   (define m (Type-mono? t))
+   (cond
+    [(eq? m 'unset)
+     (define b
+       (match t
+         [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _)
+              (app (match-lambda [(or (TMap: _ d r _) (TCut: _ d r)) (list d r)] [_ #f]) ts))
+          (andmap ((curry coind) A) ts)]
+         [(or (Tμ: _ _ (Scope t) _ _ _)  (TSet: _ t _))
+          (coind A t)]
+         [(? TΛ?) #f]
+         [(TName: _ x _)
+          (or (set-member? A x) ;; already looked up name and haven't failed yet.
+              (coind (set-add A x)
+                     (hash-ref (Language-user-spaces (current-language)) x)))]
+         [_ #t]))
+     (set-Type-mono?! t b)
+     b]
+    [else m])))
 
 (define (type-contains? ty inner)
   (let search ([ty ty])
     (or (equal? ty inner)
         (match ty
-          [(or (TΛ: _ (Scope t)) (Tμ: _ (Scope t) _ _ _)) (search t)]
+          [(or (TΛ: _ _ (Scope t)) (Tμ: _ _ (Scope t) _ _ _)) (search t)]
           ;; boilerplate
           [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?)) #f]
-          [(or (TSUnion: ts) (TRUnion: ts) (TVariant: _ ts _ _)) (ormap search ts)]
-          [(TCut: t u) (or (search t) (search u) (search (resolve ty)))]
-          [(TMap: t-dom t-rng _)
+          [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _)) (ormap search ts)]
+          [(TCut: _ t u) (or (search t) (search u)
+                           (search (resolve ty)))]
+          [(TMap: _ t-dom t-rng _)
            (or (search t-dom) (search t-rng))]
-          [(TSet: t _) (search t)]))))
+          [(TSet: _ t _) (search t)]
+          [_ (error 'type-contains? "Bad type ~a" ty)]))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Other type operations
@@ -230,16 +320,30 @@
   (append-map
    (λ (t)
       (match t
-        [(or (TRUnion: ts*) (TSUnion: ts*))
+        [(or (TRUnion: _ ts*) (TSUnion: _ ts*))
          (flatten-unions-in-list ts*)]
         [_ (list t)]))
    ts))
 
-(define (simplify-types ts)
-  (match (remove-sorted-dups (sort (flatten-unions-in-list ts) < #:key Type-key))
+;; Only incomparable types should be represented in a union.
+;; When a type subsumes another, we remove the subsumed type.
+(define (remove-subtypes ts)
+  (match ts
+    ['() '()]
+    [(cons t ts)
+     ;; If t is subtyped in the rest of the list, drop it.
+     (if (for/or ([s (in-list ts)]) (<:? t s))
+         (remove-subtypes ts)
+         (cons t (remove-subtypes ts)))]))
+
+;; Canonicalize a list of types to forbid disequal but equivalent types.
+(define (simplify-types U ts)
+  (match (remove-subtypes
+          (remove-sorted-dups
+           (sort (flatten-unions-in-list ts) < #:key Type-key)))
     [(list t) t]
     ['() T⊥]
-    [ts ts]))
+    [ts (U ts)]))
 
 ;; reverses, but it's still canonically sorted.
 (define (remove-sorted-dups ts) ;; assumes #f not the first element of list.
@@ -249,177 +353,361 @@
       [(cons t ts)
        (if (equal? t last)
            (loop ts last new)
-           (loop ts t (cons t new)))])))
-(define (*TSUnion ts) (mk-TSUnion (simplify-types ts)))
-(define (*TRUnion ts) (mk-TRUnion (simplify-types ts)))
+           (loop ts t (cons t new)))]
+      [_ (error 'loop "Expected a list of types ~a" ts)])))
+(define (*TSUnion sy ts) 
+  (unless (list? ts) (error '*TSUnion "WAT"))
+  (simplify-types ((curry mk-TSUnion) sy) ts))
+(define (*TRUnion sy ts)
+  (unless (list? ts) (error '*TRUnion "WAT"))
+  (simplify-types ((curry mk-TRUnion) sy) ts))
 
 (define (needs-resolve? τ)
-  (or (TName? τ) (Tμ? τ) (TCut? τ)))
+  (or (TName? τ) (Tμ? τ) (TCut? τ) (TUnif? τ)))
 
 ;; resolve : Type Map[Name,Type] -> Maybe[Type]
-(define (resolve t Γ)
-  (let fuel ([t t] [i (hash-count Γ)])
-    (and (< 0 i)
-         (match t
-           [(TName: x _) (fuel (hash-ref Γ x) (sub1 i))]
-           [(Tμ: x st r c n)
-            ;; INVARIANT: the only μs at this point are trusted.
-            (unless (or r c) (error 'resolve "Unfolds should be resolved first: ~a" t))
-            (open-scope st t)]
-           [(TCut: t* u)
-            (match (resolve t*)
-              [(TΛ: _ st) (resolve (open-scope st u))]
-              [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
-           [_ t]))))
+(define (resolve t [extra-Γ #f])
+  (define Γ (Language-user-spaces (current-language)))
+  (define Γcount (+ (hash-count Γ) (if extra-Γ (hash-count extra-Γ) 0)))
+  (let reset ([t t])
+    (let fuel ([t t] [i Γcount])
+      (and (< 0 i)
+           (match t
+             [(TName: sy x taddr)
+              (match (hash-ref Γ x #f)
+                [#f (mk-TName sy (hash-ref extra-Γ x) taddr)]
+                [τ (fuel τ (sub1 i))])]
+             [(Tμ: sy x st r c n)
+              ;; INVARIANT: the only μs at this point are trusted.
+              (unless (or r c) (error 'resolve "Unfolds should be resolved first: ~a" t))
+              (fuel (open-scope st t) (sub1 i))]
+             [(TCut: _ t* u)
+              (match (reset t*)
+                [(TΛ: _ _ st) (reset (open-scope st u))]
+                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
+             [(TUnif τ) τ]
+             [_ t])))))
 
-(define (<:? L τ σ)
-  ((<:?-aux (Language-user-spaces L) #f) ∅ τ σ))
-(define ((<:?-aux Γ E<:) A τ σ) ;; TODO: use axiom rules
-  (let <:?-aux ([A A] [τ τ] [σ σ])
-       (define-syntax seq-<:
-         (syntax-rules ()
-           [(_ A last) last]
-           [(_ A τ σ more0 . more)
-            (let ([A (<:?-aux A τ σ)])
-              (seq-<: A more0 . more))]))
-       (define (grow-A) (set-add A (cons τ σ)))
-       (cond
-        [(equal? τ σ) A]
-        [(set-member? A (cons τ σ)) A]
-        [else
-         (match* (τ σ)
-           [(_ (? T⊤?)) #t]
-           [((? T⊥?) _) #t]
-           [((or (TRUnion: ts) (TSUnion: ts)) _)
-            (let each ([A (grow-A)] [ts ts])
-              (match ts
-                ['() #t]
-                [(cons t ts)
-                 (seq-<: A
-                         t σ
-                         (each A* ts))]))]
-           [(_ (or (TRUnion: σs) (TSUnion: σs)))
-            (let some ([A (grow-A)] [σs σs])
-              (match σs
-                ['() #f]
-                [(cons σ σs)
-                 (define A* (<:?-aux A τ σ))
-                 (or A* (some A* σs))]))]
-           [((TΛ: _ sτ) (TΛ: _ sσ))
-            (define name (mk-TFree (gensym 'dummy) #f))
-            (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
-           [((TSet: τ ext) (TSet: σ ext)) (<:?-aux A τ σ)]
-           [((TMap: τk τv ext) (TMap: σk σv ext))
-            (seq-<: A
-                    τk σk
-                    (<:?-aux A σv σv))]
-           ;; XXX: for now, trust does not have subtyping.
-           [((TVariant: n τs tr tc) (TVariant: n σs tr tc))
-            (let each ([A (grow-A)] [τs τs] [σs σs])
-              (match* (τs σs)
-                [('() '()) A]
-                [((cons τ τs) (cons σ σs))
-                 (seq-<: A τ σ (each A τs σs))]
-                [(_ _) #f]))]
-           [((? needs-resolve?) _) (<:?-aux (grow-A) (resolve τ Γ) σ)]
-           [(_ (? needs-resolve?)) (<:?-aux (grow-A) τ (resolve σ Γ))]
-           [(_ _) #f])])))
+(define-syntax seq
+  (syntax-rules ()
+    [(_ A last) last]
+    [(_ A more0 . more)
+     (let* ([A more0])
+       (and A
+            (seq A . more)))]))
 
-(define (type-join L τ σ)
-  (cond [(<:? L τ σ) σ]
-        [(<:? L σ τ) τ]
-        [else
-         (match* (τ σ)
-           [((TVariant: n τs tr tc) (TVariant: n σs tr tc)) ???]
-           [((TΛ: x (Scope t)) (TΛ: _ (Scope s))) ???]
-           ;; boilerplate
-           ;;[(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?)) t]
-           [((TSUnion: ts) _) ???]
-           [(TRUnion: ts) ???]
-           [(TMap: t-dom t-rng ext) ???]
-           [((TSet: t ext) (TSet: s ext)) ???]
-           ;; FIXME: ???
-           [(Tμ: x (Scope t) r c n) ???]
-           [(TCut: t u) ???]
-           [(_ _) (*TRUnion (list τ σ))])]) (error 'type-join "Todo"))
+;; The TAPL approach to equirecursive subtyping.
+;; Uses language axioms for external subtyping.
+(define (<:? τ σ)
+  (define L (current-language))
+  ((<:?-aux (Language-E<: L)) ∅ τ σ))
+(define ((<:?-aux E<:) A τ σ)
+  (define (<:?-aux A τ σ)
+    (define (grow-A) (set-add A (cons τ σ)))
+    (cond
+     [(equal? τ σ) A]
+     [(set-member? A (cons τ σ)) A]
+     [else
+      (match* (τ σ)
+        [(_ (? T⊤?)) A]
+        [((? T⊥?) _) A]
+        [((TVariant: _ n τs tr0 tc0) (TVariant: _ n σs tr1 tc1))
+         #:when (and (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1))
+                     (or (eq? tc0 'dc) (eq? tc1 'dc) (equal? tc0 tc1)))
+         (let each ([A (grow-A)] [τs τs] [σs σs])
+           (match* (τs σs)
+             [('() '()) A]
+             [((cons τ τs) (cons σ σs))
+              (seq A (<:?-aux A τ σ) (each A τs σs))]
+             [(_ _) #f]))]
+        [((TSet: _ τ ext) (TSet: _ σ ext)) (<:?-aux A τ σ)]
+        [((TMap: _ τk τv ext) (TMap: _ σk σv ext))
+         (seq A
+              (<:?-aux A τk σk)
+              (<:?-aux A σv σv))]
+        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
+         (let each ([A (grow-A)] [ts ts])
+           (match ts
+             ['() A]
+             [(cons t ts)
+              (seq A
+                   (<:?-aux A t σ)
+                   (each A ts))]
+             [_ (error 'each "Expected a list of types ~a" ts)]))]
+        [(_ (or (TRUnion: _ σs) (TSUnion: _ σs)))
+         (let some ([A (grow-A)] [σs σs])
+           (match σs
+             ['() #f]
+             [(cons σ σs)
+              (or (<:?-aux A τ σ)
+                  (some A σs))] ;; Do not save false path
+             [_ (error 'some "Expected a list of types ~a" σs)]))]
+        [((TΛ: _ _ sτ) (TΛ: _ _ sσ))
+         (define name (mk-TFree #f (gensym 'dummy) #f))
+         (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
+        [(_ (TExternal: _ name)) (and (set-member? E<: (cons τ name)) A)]
+        [((? needs-resolve?) _) (<:?-aux (grow-A) (resolve τ) σ)]
+        [(_ (? needs-resolve?)) (<:?-aux (grow-A) τ (resolve σ))]
+        [(_ _) #f])]))
+  (<:?-aux A τ σ))
 
-(define (type-meet L τ σ)
-  (cond [(<:? L τ σ) τ]
-        [(<:? L σ τ) σ]
-        [else
-         (match* (τ σ)
-           [(_ _) (error 'type-meet "Todo")])]))
+(define (⊔b b0 b1) (cond [(eq? b0 'dc) b1]
+                         [(eq? b1 'dc) b0]
+                         [else (or b0 b1)]))
 
-(define (castable L from to)
-  (define us (Language-user-spaces L))
-  (let check ([from from] [to to])
-    (or (<:? L from to) ;; upcast
-        (T⊤? from)
+(define (⊓b b0 b1) (cond [(eq? b0 'dc) b1]
+                         [(eq? b1 'dc) b0]
+                         [else (and b0 b1)]))
+
+(define (type-join τ σ)
+  (define us (Language-user-spaces (current-language)))
+  (define (⊔ τ σ ρ)
+    (define (join-named x taddr σ)
+      (match (hash-ref ρ x #f)
+        [#f (define x* (gensym x))
+            (define τσ (⊔ (hash-ref us x) σ (hash-set ρ x x*)))
+            (hash-set! us x* τσ)
+            τσ]
+        [y (⊔ (mk-TName y taddr) σ ρ)]))
+    (define (unify τ σ)
+      (define out (⊔ (TUnif-τ τ) σ ρ))
+      (set-TUnif-τ! τ out)
+      τ)
+    (cond
+     [(<:? τ σ) σ]
+     [(<:? σ τ) τ]
+     [else
+      (match* (τ σ)
+        [((TVariant: _ n τs tr0 tc0) (TVariant: _ n σs tr1 tc1))
+         #:when (and (= (length τs) (length σs))
+                     (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1))
+                     (or (eq? tc0 'dc) (eq? tc1 'dc) (equal? tc0 tc1)))
+         (mk-TVariant #f n (for/list ([τ (in-list τs)]
+                                   [σ (in-list σs)])
+                          (⊔ τ σ ρ))
+                      (⊔b tr1 tr0)
+                      (⊔b tc1 tc0))]
+        ;; Make Λs agree on a name and abstract the result.
+        [((TΛ: _ x st) (TΛ: _ _ ss))
+         (define fresh (gensym 'joinΛ))
+         (define tv (mk-TFree #f fresh #f))
+         (mk-TΛ #f x
+                (abstract-free (⊔ (open-scope st tv)
+                                  (open-scope ss tv)
+                                  ρ)
+                               fresh))]
+        ;; If not an abstraction, unify.
+        [((TΛ: _ x st) _) (⊔ (open-scope st (TUnif T⊥)) σ ρ)]
+        [(_ (TΛ: _ x ss)) (⊔ τ (open-scope ss (TUnif T⊥)) ρ)]
+        [((? TUnif?) _) (unify τ σ)]
+        [(_ (? TUnif?)) (unify σ τ)]
+        ;; distribute unions
+        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
+         (*TRUnion #f (for/list ([t (in-list ts)])
+                        (⊔ t σ ρ)))]
+        [(_ (or (TRUnion: _ ts) (TSUnion: _ ts)))
+         (*TRUnion #f (for/list ([t (in-list ts)])
+                     (⊔ τ t ρ)))]
+        ;; map and set are structural
+        [((TMap: _ fd fr fext) (TMap: _ td tr text))
+         (mk-TMap #f
+                  (⊔ fd td ρ)
+                  (⊔ fr tr ρ)
+                  (⊔b fext text))]
+        [((TSet: _ t fext) (TSet: _ s text))
+         (mk-TSet (⊔ t s ρ) (⊔b fext text))]
+        ;; The join of two recursive types requires them agreeing on their variable.
+        [((Tμ: _ x sτ fr fc fn) (Tμ: _ _ sσ tr tc tn))
+         (define fresh (gensym 'joinμ))
+         (define tv (mk-TFree #f fresh #f))
+         (mk-Tμ #f x
+                (abstract-free (⊔ (open-scope sτ tv) (open-scope sσ tv) ρ) fresh)
+                (⊔b fr tr)
+                (⊔b fc tc)
+                (min fn tn))]
+        ;; Named types are like recursive types, but trickier to get the name agreement right.
+        [((TName: _ x taddr) _) (join-named x taddr σ)]
+        [(_ (TName: _ x taddr)) (join-named x taddr τ)]
+        [((? TCut?) _) (⊔ (resolve τ ρ) σ ρ)]
+        [(_ (? TCut?)) (⊔ τ (resolve σ ρ) ρ)]
+        [(_ _) (*TRUnion #f (list τ σ))])]))
+  (freeze (⊔ τ σ #hasheq())))
+
+(define (type-meet τ σ)
+  ;; potentially creates several equal but differently named types.
+  (define us (Language-user-spaces (current-language)))
+  (define (⊓ τ σ ρ)
+    (define (meet-named x taddr σ)
+      (match (hash-ref ρ x #f)
+        [#f (define x* (gensym x))
+            (define τσ (⊓ (hash-ref us x) σ (hash-set ρ x x*)))
+            (hash-set! us x* τσ)
+            τσ]
+        [y (⊓ (mk-TName y taddr) σ ρ)]))
+    (define (unify τ σ)
+      (define out (⊓ (TUnif-τ τ) σ ρ))
+      (set-TUnif-τ! τ out)
+      τ)
+   (cond [(<:? τ σ) τ]
+         [(<:? σ τ) σ]
+         [else
+          (match* (τ σ)
+            [((TVariant: _ n τs tr0 tc0) (TVariant: _ n σs tr1 tc1))
+             #:when (and (= (length τs) (length σs))
+                         (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1))
+                         (or (eq? tc0 'dc) (eq? tc1 'dc) (equal? tc0 tc1)))
+             (mk-TVariant #f n (for/list ([τ (in-list τs)]
+                                          [σ (in-list σs)])
+                                 (⊓ τ σ ρ))
+                          (⊓b tr1 tr0)
+                          (⊓b tc1 tc0))]
+            ;; Make Λs agree on a name and abstract the result.
+            [((TΛ: _ x st) (TΛ: _ _ ss))
+             (define fresh (gensym 'joinΛ))
+             (define tv (mk-TFree #f fresh #f))
+             (mk-TΛ #f x
+                    (abstract-free (⊓ (open-scope st tv)
+                                      (open-scope ss tv)
+                                      ρ)
+                                   fresh))]
+            ;; If not both abstractions, start at ⊤ and narrow.
+            [((TΛ: _ _ st) _) (⊓ (open-scope st (TUnif T⊤)) σ ρ)]
+            [(_ (TΛ: _ _ ss)) (⊓ τ (open-scope ss (TUnif T⊤)) ρ)]
+            [((? TUnif?) _) (unify τ σ)]
+            [(_ (? TUnif?)) (unify σ τ)]
+            ;; distribute unions
+            [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
+             (printf "Dist left ~a, ~a~%" ts σ)
+             (*TRUnion #f (for/list ([t (in-list ts)])
+                            (⊓ t σ ρ)))]
+            [(_ (or (TRUnion: _ ts) (TSUnion: _ ts)))
+             (printf "Dist right ~a, ~a~%" ts τ)
+             (*TRUnion #f (for/list ([t (in-list ts)])
+                            (⊓ τ t ρ)))]
+            ;; map and set are structural
+            [((TMap: _ fd fr fext) (TMap: _ td tr text))
+             (mk-TMap #f (⊓ fd td ρ)
+                      (⊓ fr tr ρ)
+                      (⊓b fext text))]
+            [((TSet: _ t fext) (TSet: _ s text))
+             (mk-TSet #f (⊓ t s ρ) (⊓b fext text))]
+            ;; The join of two recursive types requires them agreeing on their variable.
+            [((Tμ: _ x sτ fr fc fn) (Tμ: _ _ sσ tr tc tn))
+             (define fresh (gensym 'joinμ))
+             (define tv (mk-TFree #f fresh #f))
+             (mk-Tμ #f x
+                    (abstract-free
+                     (⊓
+                      (open-scope sτ tv)
+                      (open-scope sσ tv)
+                      ρ)
+                     fresh)
+                    (⊓b fr tr)
+                    (⊓b fc tc)
+                    (min fn tn))]
+            ;; Named types are like recursive types, but trickier to get the name agreement right.
+            [((TName: _ x taddr) _) (meet-named x taddr σ)]
+            [(_ (TName: _ x taddr)) (meet-named x taddr τ)]
+            [((? TCut?) _) (⊓ (resolve τ ρ) σ ρ)]
+            [(_ (? TCut?)) (⊓ τ (resolve σ ρ) ρ)]
+            [(_ _) T⊥])]))
+  (trace ⊓)
+  (freeze (⊓ τ σ #hasheq())))
+
+;; τ is castable to σ if τ <: σ, τ = ⊤,
+;; or structural components of τ are castable to structural components of σ.
+(define (castable from to)
+  (define (check A from to)
+    (if (or
+         (<:? from to) ;; upcast
+         (T⊤? from))
+        A
         (match* (from to)
-          [((TΛ: _ (Scope f)) (TΛ: _ (Scope t)))
-           (check f t)]
-          [((TVariant: n tsf tr tc) (TVariant: n tst tr tc))
-           (let all ([tsf tsf] [tst tst])
+          [((TΛ: _ _ (Scope f)) (TΛ: _ _ (Scope t)))
+           (check A f t)]
+          [((TVariant: _ n tsf tr0 tc0) (TVariant: _ n tst tr1 tc1))
+           #:when (and (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1))
+                       (or (eq? tc0 'dc) (eq? tc1 'dc) (equal? tc0 tc1)))
+           (let all ([A A] [tsf tsf] [tst tst])
              (match* (tsf tst)
-               [('() '()) #t]
+               [('() '()) A]
                [((cons f tsf) (cons t tst))
-                (and (check f t) (all tsf tst))]
+                (seq A (check A f t) (all A tsf tst))]
                [(_ _) #f]))]
-          [((Tμ: _ (Scope f) r c n) (Tμ: _ (Scope t) r c n))
-           (check f t)]
-          [((TMap: df rf) (TMap: dt rt))
-           (and (check df dt)
-                (check rf rt))]
-          [((TSet: f) (TSet: t)) (check f t)]
-          [((TSUnion: tsf) _) (error 'castable "Todo: unions")]
-          [(_ (TSUnion: tst)) (error 'castable "Todo: unions")]
+          [((Tμ: _ _ (Scope f) r c n) (Tμ: _ _ (Scope t) r c n))
+           (check A f t)]
+          [((TMap: _ df rf ext) (TMap: _ dt rt ext))
+           (seq (check A df dt)
+                (check A rf rt))]
+          [((TSet: _ f ext) (TSet: _ t ext)) (check A f t)]
+          [((TSUnion: _ tsf) _)
+           (for/fold ([A A]) ([tf (in-list tsf)]
+                              #:when A)
+             (check A tf to))]
+          [(_ (TSUnion: _ tst))
+           ;; Don't save false paths
+           (for/or ([tt (in-list tst)]) (check A from tt))]
+          ;; XXX: Will this possibly diverge?
           [((and (not (? Tμ?)) (? needs-resolve?)) _)
-           (check (resolve from us) to)]
+           (if (set-member? A (cons from to))
+               A
+               (check (set-add A (cons from to))
+                      (resolve from) to))]
           [(_ (and (not (? Tμ?)) (? needs-resolve?)))
-           (check from (resolve to us))]
-          [(_ _) #f]))))
+           (if (set-member? A (cons from to))
+               A
+               (check (set-add A (cons from to))
+                      from (resolve to)))]
+          [(_ _) #f])))
+  (and (check ∅ from to) #t))
+
+(define (cast-to from to)
+  (if (castable from to)
+      to
+      (error 'cast-to "Could not cast ~a to ~a" from to)))
 
 ;; Find all instances of variants named n with given arity, and return
 ;; their type, additionally quantified by all the containing Λs.
-(define (lang-variants-of-arity L n arity)
-  (define us (Language-user-spaces L))
+(define (lang-variants-of-arity upper-bound)
+  (define us (Language-user-spaces (current-language)))
+  (define seen (mutable-seteq))
   (for/fold ([found '()])
       ([τ (in-hash-values us)])
-    (let collect ([τ τ] [TVs '()] [found fould] [μs ∅eq] [names ∅eq])
+    (define (collect τ TVs Name-TVs found)
       (define (collect* τs found)
         (match τs
           ['() found]
           [(cons τ τs)
-           (define found* (collect τ TVs found μs names))
-           (collect* τs found*)]))
-      (match τ
-        [(TVariant: n* ts tr tc)
-         (define found*
-           (if (and (eq? n n*)
-                    (= arity (length ts)))
-               (cons (quantify-frees TVs τ) found)
-               found))
-         (collect* ts found*)]
-        [(TΛ: x s)
-         (define x* (gensym x))
-         (define TVs* (cons x* TVs))
-         (collect (open-scope s (mk-TFree x* #f)) TVs* found μs names)]
-        [(TName: x _)
-         (if (set-member? names x)
-             found
-             (collect (hash-ref us x) TVs found μs (set-add names x)))]
-        [(Tμ: x s)
-         (if (set-member? μs τ)
-             found
-             (collect (open-scope s τ) TVs found (set-add μs τ) names))]
-        [(? TCut?) (collect (resolve τ us) TVs found μs names)]
-        [(TMap: d r _)
-         (collect r TVs
-                  (collect d TVs found μs names)
-                  μs names)]
-        [(TSet: v) (collect v TVs found μs names)]
-        [(or (TRUnion: ts) (TSUnion: ts)) (collect* ts found)]
-        [_ found]))))
+           (define found* (collect τ TVs Name-TVs found))
+           (collect* τs found*)]
+          [_ (error 'collect* "Expected a list of types: ~a" τs)]))
+      (cond
+       [(set-member? seen τ) found]
+       [else
+        (set-add! seen τ)
+        (match τ
+          [(TVariant: _ n* ts tr tc)
+           (define found*
+             (if (<:? τ upper-bound) ;; But what if we need to unify?
+                 (cons (quantify-frees τ TVs #:names Name-TVs) found)
+                 found))
+           (collect* ts found*)]
+          [(TΛ: _ x s)
+           (define x* (gensym x))
+           (define TVs* (cons x* TVs))
+           (collect (open-scope s (mk-TFree #f x* #f)) TVs* (cons x Name-TVs) found)]
+          [(TName: _ x _)
+           found]
+          [(Tμ: _ x s r c n)
+           (collect (open-scope s (mk-TFree #f (gensym x) #f)) TVs Name-TVs found)]
+          [(? TCut?) (collect (resolve τ) TVs Name-TVs found)]
+          [(TMap: _ d r _)
+           (collect r TVs Name-TVs (collect d TVs Name-TVs found))]
+          [(TSet: _ v _) (collect v TVs Name-TVs found)]
+          [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
+          [_ found])]))
+    (collect τ '() '() found)))
+(trace lang-variants-of-arity)
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.
@@ -436,39 +724,41 @@
   (match t
     [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?) (? TName?)) #t]
     [(? TFree?) #f]
-    [(or (Tμ: _ (Scope t) _ _ _) (TΛ: _ (Scope t)) (TSet: t _))
+    [(or (Tμ: _ _ (Scope t) _ _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
      (no-free? t)]
     ;; boilerplate
-    [(or (TSUnion: ts) (TRUnion: ts) (TVariant: _ ts _ _))
+    [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _))
      (andmap no-free? ts)]
-    [(or (TMap: t0 t1 _) (TCut: t0 t1))
-     (and (no-free? t0) (no-free? t1))]))
+    [(or (TMap: _ t0 t1 _) (TCut: _ t0 t1))
+     (and (no-free? t0) (no-free? t1))]
+    [_ (error 'no-free? "Bad type: ~a" t)]))
 
-(define (close-type-with t ES meta-names space-info forall)
+(define (close-type-with t Enames meta-names space-info forall)
   (let/ec break
     (let close ([t (for/fold ([t t]) ([ta (in-list forall)])
                      (TΛ ta (abstract-free t ta)))])
       (match t
-        [(TFree: x taddr)
+        [(TFree: sy x taddr)
          (cond
-          [(hash-has-key? ES x) (mk-TExternal x)]
+          [(set-member? Enames x) (mk-TExternal sy x)]
           [(hash-has-key? meta-names x)
            (define S (hash-ref meta-names x))
-           (if (hash-has-key? ES S)
-               (mk-TExternal S)
-               (mk-TName S taddr))]
+           (if (set-member? Enames S)
+               (mk-TExternal sy S)
+               (mk-TName sy S taddr))]
           [else (break #f)])]
         ;; boilerplate
         [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?)) t]
-        [(Tμ: x (Scope t) r c n) (mk-Tμ x (Scope (close t)) r c n)]
-        [(TΛ: x (Scope t)) (mk-TΛ x (Scope (close t)))]
-        [(TSUnion: ts) (mk-TSUnion (map close ts))]
-        [(TRUnion: ts) (mk-TRUnion (map close ts))]
-        [(TVariant: n ts r c) (mk-TVariant n (map close ts) r c)]
-        [(TMap: d r ex) (mk-TMap (close d) (close r) ex)]
-        [(TSet: s ex) (mk-TSet (close s) ex)]
-        [(TCut: t u) (mk-TCut (close t) (close u))]
-        [(? TName?) (error 'close-type-with "Already closed ~a" t)]))))
+        [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (close t)) r c n)]
+        [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (close t)))]
+        [(TSUnion: sy ts) (mk-TSUnion sy (map close ts))]
+        [(TRUnion: sy ts) (mk-TRUnion sy (map close ts))]
+        [(TVariant: sy n ts r c) (mk-TVariant sy n (map close ts) r c)]
+        [(TMap: sy d r ex) (mk-TMap sy (close d) (close r) ex)]
+        [(TSet: sy s ex) (mk-TSet sy (close s) ex)]
+        [(TCut: sy t u) (mk-TCut sy (close t) (close u))]
+        [(? TName?) (error 'close-type-with "Already closed ~a" t)]
+        [_ (error 'close-type-with "Bad type: ~a" t)]))))
 
 ;; check-path-productive : Type Type (any -> ⊥) -> (void)
 ;; (void) iff endpoint unreachable from t. Otherwise break invoked with #f.
@@ -476,8 +766,8 @@
   (let search ([t t])
     (when (eq? t endpoint) (break #f))
     (match t
-      [(or (TΛ: _ (Scope t)) (Tμ: _ (Scope t) _ _ _)) (search t)]
-      [(or (TSUnion: ts) (TRUnion: ts)) (for-each search ts)]
+      [(or (TΛ: _ _ (Scope t)) (Tμ: _ _ (Scope t) _ _ _)) (search t)]
+      [(or (TSUnion: _ ts) (TRUnion: _ ts)) (for-each search ts)]
       [_ (void)])))
 
 ;; vaguely-shaped? : Listof[Type] -> Boolean
@@ -499,7 +789,7 @@
         (when set? (break #t))
         (values map? #t)]
        [(? TFree?) (break #t)]
-       [(TVariant: name ts _ _)
+       [(TVariant: _ name ts _ _)
         (define n-arity (cons name (length ts)))
         (cond
          [(set-member? name-arities n-arity) (break #t)]
@@ -514,39 +804,41 @@
 ;; Simplifies unions and classifies them as raw or shapely.
 ;; If ar? is #f, then the result is #f if any raw unions are detected.
 ;; If the type has an unguarded recursive type variable, then the result is #f.
-(define (check-productive-and-classify-unions t ar? Γ)
+(define (check-productive-and-classify-unions t ar?)
   (let/ec break
     (let loop ([t t] [unrolled ∅eq])
       (define (loop* t) (loop t unrolled))
       (match t
-        [(TΛ: x st) ;; XXX: TFree taddr should be #f or...?
-         (mk-TΛ (abstract-free (loop (open-scope st (TFree x #f)) unrolled) x))]
-        [(Tμ: x st r c n)
+        [(TΛ: sy x st) ;; XXX: TFree taddr should be #f or...?
+         (mk-TΛ sy x (abstract-free (loop (open-scope st (TFree x #f)) unrolled) x))]
+        [(Tμ: sy x st r c n)
          (cond
           [(set-member? unrolled t)
            ;; It's been unfolded once. We won't unfold more than that.
-           (loop (open-scope st (TFree x #f)) unrolled)]
+           (loop (open-scope st (mk-TFree sy x #f)) unrolled)]
           [else
            (define opened (open-scope st t))
            (check-path-productive opened t break) ;; uses pointer equality
-           (mk-Tμ x (abstract-free (loop opened (set-add unrolled t)) x) r c n)])]
-        [(TName: x _)
+           (mk-Tμ sy x (abstract-free (loop opened (set-add unrolled t)) x) r c n)])]
+        [(TName: sy x _)
          (cond
           [(set-member? unrolled x) t]
-          [else (loop (hash-ref Γ x (λ () (error 'check-path-productive "Unbound name ~a" x)))
+          [else (loop (hash-ref (Language-user-spaces (current-language))
+                                x (λ () (error 'check-path-productive "Unbound name ~a" x)))
                       (set-add unrolled x))])]
-        [(or (TSUnion: ts) (TRUnion: ts))
+        [(or (TSUnion: sy ts) (TRUnion: sy ts))
          (define ts* (map loop* ts))
          (define ts** (flatten-unions-in-list ts*))
          (cond
           [(vaguely-shaped? ts**)
            (unless ar? (break #f))
-           (*TRUnion ts**)]
-          [else (*TSUnion ts**)])]
-        [(TVariant: n ts r c)
-         (mk-TVariant n (map loop* ts) r c)]
-        [(TMap: t-dom t-rng ext)
-         (mk-TMap (loop* t-dom) (loop* t-rng) ext)]
-        [(TSet: t ext)
-         (mk-TSet (loop* t) ext)]
+           (*TRUnion sy ts**)]
+          [else
+           (*TSUnion sy ts**)])]
+        [(TVariant: sy n ts r c)
+         (mk-TVariant sy n (map loop* ts) r c)]
+        [(TMap: sy t-dom t-rng ext)
+         (mk-TMap sy (loop* t-dom) (loop* t-rng) ext)]
+        [(TSet: sy t ext)
+         (mk-TSet sy (loop* t) ext)]
         [_ t]))))

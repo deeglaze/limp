@@ -6,10 +6,11 @@ and semantics.
 
 (provide (all-defined-out))
 
+(struct with-stx (stx) #:transparent)
 ;; Cast or Check annotations?
 (struct Cast (t) #:transparent)
 (struct Check (t) #:transparent)
-(struct Typed (ct) #:transparent)
+(struct Typed with-stx (ct) #:transparent)
 
 ;; Elaborated patterns
 (struct Pattern Typed () #:transparent)
@@ -49,18 +50,18 @@ Template:
 (struct Variant Term (n ts) #:transparent)
 (struct Map Term (f) #:transparent)
 (struct Set Term (s) #:transparent)
-(struct External (v) #:transparent)
+(struct External Term (v) #:transparent)
 
 ;; Expressions
 (struct Expression Typed () #:transparent)
-(struct ECall Expression (mf τs es) #:transparent)
-(struct EVariant Expression (n τs es) #:transparent)
+(struct ECall Expression (mf tag τs es) #:transparent)
+(struct EVariant Expression (n tag τs es) #:transparent)
 (struct ERef Expression (x) #:transparent)
-(struct EStore-lookup (k lm) #:transparent) ;; lm ::= 'resolve | 'delay | 'deref
-(struct EAlloc (tag) #:transparent) ;; space mm em in type
+(struct EStore-lookup Expression (k lm) #:transparent) ;; lm ::= 'resolve | 'delay | 'deref
+(struct EAlloc Expression (tag) #:transparent) ;; space mm em in type
 (struct ELet Expression (bus body) #:transparent)
 (struct EMatch Expression (discriminant rules) #:transparent)
-(struct EExtend Expression (m k v) #:transparent)
+(struct EExtend Expression (m tag k v) #:transparent)
 (struct EEmpty-Map Expression () #:transparent)
 (struct EEmpty-Set Expression () #:transparent)
 (struct ESet-add Expression (s v) #:transparent)
@@ -76,14 +77,14 @@ Template:
 #|
 Template
 (match e
-    [(ECall ct mf es) ???]
-    [(EVariant ct n es) ???]
+    [(ECall ct mf tag es) ???]
+    [(EVariant ct n tag es) ???]
     [(ERef ct x) ???]
     [(EStore-lookup ct k lm) ???]
     [(EAlloc ct tag) ???]
     [(ELet ct bus body) ???]
     [(EMatch ct de rules) ???]
-    [(EExtend ct m k v) ???]
+    [(EExtend ct m tag k v) ???]
     [(EEmpty-Map ct) ???]
     [(EEmpty-Set ct) ???]
     [(ESet-union ct es) ???]
@@ -97,7 +98,7 @@ Template
 |#
 
 ;; Binding updates
-(struct Update (k v) #:transparent)
-(struct Where (pat e) #:transparent)
+(struct Update with-stx (k v) #:transparent)
+(struct Where with-stx (pat e) #:transparent)
 
-(struct Rule (name lhs rhs bus) #:transparent)
+(struct Rule with-stx (name lhs rhs bus) #:transparent)

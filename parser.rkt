@@ -9,70 +9,38 @@
          racket/pretty)
 (provide parse-language
          parse-reduction-relation
-         Rule-cls)
+         TopPreType ClosedTopPreType
+         Rule-cls
+         Expression-cls)
 
 
 (module+ test (require rackunit))
-(define limp-default-mm 'delay)
-(define limp-default-em 'identity)
-(define limp-default-addr-space 'limp)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Fully annotated Limp code
 
-(define (type-join t0 t1)
-  (if (equal? t0 t1)
-      t0
-      (match* (t0 t1)
-        [((TMap: d0 r0 ext) (TMap: d1 r1 ext))
-         (mk-TMap (type-join d0 d1) (type-join r0 r1) ext)]
-        [((TSet: s0 ext) (TSet: s1 ext))
-         (mk-TSet (type-join s0 s1) ext)]
-        [(_ _)
-         (define ts (simplify-types (list t0 t1)))
-         (if (vaguely-shaped? ts)
-             T⊤
-             (mk-TSUnion ts))])))
-
-(define (type->sexp t)
-  (match t
-      [(TFree: x _) x]
-      [(or (and (Tμ: x st _ _ _) (app (λ _ 'μ) head))
-           (and (TΛ: x st) (app (λ _ 'Λ) head)))
-       `(,head ,x ,(type->sexp (open-scope-hygienically st x)))]
-      [(TVariant: name ts _ _)
-       (cons name (map type->sexp ts))]
-      [(or (and (TSUnion: ts) (app (λ _ '∪) head))
-           (and (TRUnion: ts) (app (λ _ 'raw∪) head))
-           (app (match-lambda [(TMap: d r _) (list '↦ d r)]
-                              [(TSet: t _) (list '℘ t)]) (cons head ts)))
-       `(,head . ,(map type->sexp ts))]
-      [(TCut: t u)
-       (list (type->sexp t) (type->sexp u))]
-      [(? T⊤?) '⊤]
-      [(TAddr: name mm em) `(Addr ,name ,mm ,em)]
-      [(TExternal: name) name]
-      [_ (error 'type->sexp "Bad type ~a" t)]))
 (define (pretty-type t) (pretty-print (type->sexp t)))
 
-(define (free->external t ES)
+#;
+(define (free->named/external t US ES)
   (let/ec break
    (let rename ([t t])
      (match t
-       [(TFree: x _)
-        (if (hash-has-key? ES x)
-            (mk-TExternal x)
-            (break #f))]
+       [(TFree: sy x taddr)
+        (cond
+         [(hash-has-key? ES x) (mk-TExternal sy x)]
+         [(hash-has-key? US x) (mk-TName sy x taddr)]
+         [else (break #f)])]
        ;; boilerplate
-       [(Tμ: x (Scope t) r c n) (mk-Tμ x (Scope (rename t)) r c n)]
-       [(TΛ: x (Scope t)) (mk-TΛ x (Scope (rename t)))]
+       [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (rename t)) r c n)]
+       [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (rename t)))]
        [(or (? T⊤?) (? TAddr?) (? TBound?)) t]
-       [(TSUnion: ts) (mk-TSUnion (map rename ts))]
-       [(TRUnion: ts) (mk-TRUnion (map rename ts))]
-       [(TVariant: name ts r c) (mk-TVariant name (map rename ts) r c)]
-       [(TCut: t u) (mk-TCut (rename t) (rename u))]
-       [(TMap: t-dom t-rng ext) (mk-TMap (rename t-dom) (rename t-rng) ext)]
-       [(TSet: t ext) (mk-TSet (rename t) ext)]))))
+       [(TSUnion: sy ts) (mk-TSUnion sy (map rename ts))]
+       [(TRUnion: sy ts) (mk-TRUnion sy (map rename ts))]
+       [(TVariant: sy name ts r c) (mk-TVariant sy name (map rename ts) r c)]
+       [(TCut: sy t u) (mk-TCut sy (rename t) (rename u))]
+       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (rename t-dom) (rename t-rng) ext)]
+       [(TSet: sy t ext) (mk-TSet sy (rename t) ext)]))))
 
 
 ;; Not actually writable.
@@ -131,65 +99,99 @@ single address space
                             limp-default-addr-space)
            #:attr tag (attribute modes.tag)))
 
-(define-syntax-class (PreType bounded? trust?)
+(define-syntax-class (PreType bounded? trust? Unames Enames meta-table)
   #:attributes (t)
-  #:local-conventions ([#rx"^t" (PreType bounded? trust?)])
-  (pattern (#:Λ x:id tbody)
-           #:attr t (mk-TΛ (syntax-e #'x) (abstract-free (attribute tbody.t) (syntax-e #'x))))
-  (pattern (~and stx
+  #:local-conventions ([#rx"^t" (PreType bounded? trust? Unames Enames meta-table)])
+  (pattern ((~or #:Λ #:∀ #:all) (~or (~and x:id (~bind [(xs 1) (list #'x)]))
+                                     (xs:id ...))
+            tbody)
+           #:attr t (quantify-frees (attribute tbody.t)
+                                    (reverse (syntax->datum #'(xs ...)))
+                                    #:stxs (attribute xs)))
+  (pattern (~and sy
                  (#:μ x:id (~var ty:expr) u:Unrolling
                       (~parse (~var tbody (PreType (attribute u.bounded?)
-                                                   (attribute u.trust?)))
+                                                   (attribute u.trust?)
+                                                   Unames Enames meta-table))
                               #'ty)))
            #:do [(define fv (free (attribute tbody.t)))
                  (define recursive? (set-member? fv (syntax-e #'x)))
                  (unless recursive?
                    (log-info (format "Recursive type ~a recursively bound variable: ~a (at ~a)"
                                      "does not refer to"
-                                     (syntax-e #'x) (source-location-source #'stx))))]
+                                     (syntax-e #'x) (source-location-source #'sy))))]
            #:attr t (if recursive?
-                        (mk-Tμ (syntax-e #'x)
+                        (mk-Tμ #'sy (syntax-e #'x)
                                (abstract-free (attribute tbody.t) (syntax-e #'x))
                                (attribute u.bounded?)
                                (attribute u.trust?)
                                (attribute u.n))
                         (attribute tbody.t)))
-  (pattern (#:inst tf ta)
-           #:attr t (mk-TCut (attribute tf.t) (attribute ta.t)))
-  (pattern ((~or #:∪ #:union #:U) ts ...)
-           #:attr t (*TRUnion (attribute ts.t)))
+  (pattern (~and sy (#:inst tf ta ...+))
+           #:attr t (let all ([t (attribute tf.t)] [ts (attribute ta.t)])
+                      (match ts
+                        ['() t]
+                        [(cons s ts) (all (mk-TCut #'sy t s) ts)])))
+  (pattern (~and sy ((~or #:∪ #:union #:U) ts ...))
+           #:attr t (*TRUnion #'sy (attribute ts.t)))
   ;; TODO: make abstraction annotations parse errors outside of define-language
-  (pattern ((~or #:map #:↦) td tr (~optional (~and ext #:externalize)))
-           #:attr t (mk-TMap (attribute td.t) (attribute tr.t) (syntax? (attribute ext))))
-  (pattern ((~or #:set #:℘) ts (~optional (~and ext #:externalize)))
-           #:attr t (mk-TSet (attribute ts.t) (syntax? (attribute ext))))
-  (pattern (n:id ts ...)
-           #:attr t (mk-TVariant (syntax-e #'n)
+  (pattern (~and sy ((~or #:map #:↦) td tr (~optional (~and ext #:externalize))))
+           #:attr t (mk-TMap #'sy (attribute td.t) (attribute tr.t) (syntax? (attribute ext))))
+  (pattern (~and sy ((~or #:set #:℘) ts (~optional (~and ext #:externalize))))
+           #:attr t (mk-TSet #'sy (attribute ts.t) (syntax? (attribute ext))))
+  (pattern (~and sy (n:id ts ...))
+           #:attr t (mk-TVariant #'sy
+                                 (syntax-e #'n)
                                  (attribute ts.t)
                                  bounded?
                                  trust?))
-  (pattern x:id #:attr t (mk-TFree (syntax-e #'x) #f))
+  (pattern x:id #:attr t
+           (let* ([sym (syntax-e #'x)]
+                  [sym (hash-ref meta-table sym sym)])
+             (cond
+              [(set-member? Unames sym)
+               (printf "User ~a~%" sym)
+               (mk-TName #'x sym #f)]
+              [(set-member? Enames sym)
+               (printf "External ~a~%" sym)
+               (mk-TExternal #'x sym)]
+              [else
+               (printf "Free ~a~%" sym)
+               (mk-TFree #'x (syntax-e #'x) #f)])))
   (pattern [#:ref x:id (~var modes (EM-Modes #t #f))]
            #:fail-unless (and (attribute modes.mm)
                               (attribute modes.em)
                               (attribute modes.space))
            "Must specify both match-mode and equality-mode"
-           #:attr t (mk-TFree (syntax-e #'x)
+           #:attr t (mk-TFree #'x
+                              (syntax-e #'x)
                               (TAddr (attribute modes.space)
                                      (attribute modes.mm) 
-                                     (attribute modes.em))))
-  (pattern (~or #:⊤ #:top #:any) #:attr t T⊤))
+                                     (attribute modes.em)
+                                     #t)))
+  (pattern (~or #:⊤ #:top #:any) #:attr t T⊤)
+  (pattern 3d #:when (Type? (syntax-e #'3d)) #:attr t (syntax-e #'3d)))
 
-(define-syntax-class TopPreType
+(define-syntax-class (TopPreType Unames Enames meta-table)
   #:attributes (t)
-  (pattern (~var ty (PreType #f #f))
+  (pattern (~var ty (PreType #f #f Unames Enames meta-table))
            #:attr t (attribute ty.t)))
+
+(define-syntax-class ClosedTopPreType
+  #:attributes (t)
+  (pattern (~var ty (TopPreType ∅ ∅ #hasheq())) #:attr t (attribute ty.t)))
 
 (module+ test
   (test-true "Pretype success"
              (syntax-parse #'(#:μ List (#:Λ y (#:∪ (mt) (cons y (#:inst List y)))))
-               [:TopPreType #t]
+               [(~var dummy (TopPreType ∅ ∅ #hasheq())) #t]
                [_ #f])))
+
+(define-syntax-class Lookup-Mode
+  #:attributes (lm)
+  (pattern #:delay #:attr lm 'delay)
+  (pattern #:deref #:attr lm 'deref)
+  (pattern #:resolve #:attr lm 'resolve))
 
 (define-syntax-class Match-Mode
   #:attributes (mm)
@@ -218,7 +220,7 @@ single address space
 (define-syntax external reserved-for-limp)
 (define-syntax has-type reserved-for-limp)
 (define-syntax-class (inc-pat L)
-  (pattern _ #:when (hash-ref (Language-options) 'include-pattern-namespace #f)))
+  (pattern _ #:when (hash-ref (Language-options L) 'include-pattern-namespace #f)))
 
 (define-syntax-class (pand L)
   (pattern #:and)
@@ -255,85 +257,90 @@ single address space
 ;; Pattern syntax
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define-syntax-class Wild (pattern (~or (~datum _) #:wild)))
-(define-syntax-class (Pattern-cls L)
+(define-syntax-class (Pattern-cls L ct)
   #:attributes (pat)
-  #:local-conventions ([#rx"^p" (Pattern-cls L)])
-  (pattern (~or :Wild
-                [:Wild (~optional (~var ct (Compulsary-type-op L)))])
-           #:when (or (attribute ct.t)
-                      ;; FIXME: shouldn't be in language?
-                      (hash-ref (Language-options L) 'compulsary #f))
-           #:attr pat (PWild (or (attribute ct.t) T⊤)))
-  (pattern ((~var _ (pand L)) p ...)
-           #:attr pat (PAnd #f (attribute p.pat)))
-  (pattern ((~var _ (pmapwith L)) pk pv pm)
-           #:attr pat (PMap-with #f
+  #:local-conventions ([#rx"^p" (Pattern-cls L #f)])
+  (pattern (~and sy :Wild)
+           #:attr pat (PWild #'sy (or ct T⊤)))
+  (pattern (~and sy ((~var _ (pand L)) p ...))
+           #:attr pat (PAnd #'sy ct (attribute p.pat)))
+  (pattern (~and sy ((~var _ (pmapwith L)) pk pv pm))
+           #:attr pat (PMap-with #'sy ct
                                     (attribute pk.pat)
                                     (attribute pv.pat)
                                     (attribute pm.pat)))
-  (pattern ((~var _ (pmapwith* L)) pk pv pm)
-           #:attr pat (PMap-with* #f
+  (pattern (~and sy ((~var _ (pmapwith* L)) pk pv pm))
+           #:attr pat (PMap-with* #'sy ct
                                      (attribute pk.pat)
                                      (attribute pv.pat)
                                      (attribute pm.pat)))
-  (pattern ((~var _ (psetwith L)) pv ps)
-           #:attr pat (PSet-with #f
+  (pattern (~and sy ((~var _ (psetwith L)) pv ps))
+           #:attr pat (PSet-with #'sy ct
                                     (attribute pv.pat)
                                     (attribute ps.pat)))
-  (pattern ((~var _ (psetwith* L)) pv ps)
-           #:attr pat (PSet-with* #f
+  (pattern (~and sy ((~var _ (psetwith* L)) pv ps))
+           #:attr pat (PSet-with* #'sy #f
                                     (attribute pv.pat)
                                     (attribute ps.pat)))
-  (pattern ((~var _ (pname L)) x:id (~var ct (Compulsary-type-op L)))
-           #:attr pat (PName (attribute ct.t) (syntax-e #'x)))
-  (pattern ((~var _ (paddr L)) name:id
-            (~var modes (EM-Modes-default (Language-options L) #f #f)))
-           #:attr pat (PIsAddr (TAddr (syntax-e #'name (attribute modes.mm) (attribute modes.em)))))
-  (pattern ((~var _ (pexternal L)) name:id)
-           #:when (hash-has-key? (Language-external-spaces) (syntax-e #'name))
-           #:attr pat (PIsExternal (mk-TExternal (syntax-e #'name))))
-  (pattern (n:id p ...)
-           #:attr pat (PVariant #f (syntax-e #'n) (attribute p.pat)))
-  (pattern ((~var _ (pterm L)) (~var t (Term-cls L)))
-           #:attr pat (PTerm #f (attribute t.tm)))
-  (pattern ((~var _ (phastype L)) (~var t (Type-cls #t L)))
+  (pattern (~and sy ((~var _ (pname L)) x:id))
+           #:attr pat (PName #'sy ct (syntax-e #'x)))
+  (pattern (~and sy ((~var _ (paddr L)) name:id
+                     (~var modes (EM-Modes-default (Language-options L) #f #f))))
+           #:attr pat (PIsAddr #'sy (TAddr #'modes (syntax-e #'name)
+                                       (attribute modes.mm)
+                                       (attribute modes.em)
+                                       #f)))
+  (pattern (~and sy ((~var _ (pexternal L)) name:id))
+           #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
+           #:attr pat (PIsExternal #'sy (mk-TExternal #'name (syntax-e #'name))))
+  (pattern (~and sy (n:id p ...))
+           #:attr pat (PVariant #'sy ct (syntax-e #'n) (attribute p.pat)))
+  (pattern (~and sy ((~var _ (pterm L)) (~var t (Term-cls L #f))))
+           #:attr pat (PTerm #'sy ct (attribute t.tm)))
+  (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L))))
            #:when (mono-type? (attribute t.t))
-           #:attr pat (PIsType (attribute t.t))))
+           #:attr pat (PIsType #'sy (attribute t.t)))
+  (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
+  ;; Annotate/cast
+  (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))
+           #:attr pat (attribute pata.pat))
+  (pattern (#:cast (~var t (Type-cls #t L)) (~var patc (Pattern-cls L (Cast (attribute t.t)))))
+           #:attr pat (attribute patc.pat)))
 
 (define-syntax-class (Type-cls allow-raw? L)
   #:attributes (t)
-  (pattern pt:TopPreType
-           #:do [(define t-op (check-productive-and-classify-unions (attribute pt.t) allow-raw?))
-                 (define t-ext (and t-op (free->external t-op
-                                                         (Language-external-spaces L))))]
-           #:when (and t-ext)
-           #:attr t t-ext))
-(define-splicing-syntax-class (Compulsary-type-op L)
-  #:attributes (t)
-  (pattern (~var ty (Type-cls #t (Language-external-spaces L)))
-           #:attr t (Check (attribute ty.t)))
-  (pattern (~seq #:cast (~var ty (Type-cls #t (Language-external-spaces L))))
-           #:attr t (Cast (attribute ty.t)))
-  (pattern (~seq)
-           #:when (hash-ref (Language-options L) 'compulsary #f)
-           #:attr t #f))
+  (pattern (~var pt (TopPreType (hash-key-set (Language-user-spaces L))
+                                (hash-key-set (Language-external-spaces L))
+                                (Language-meta-table L)))
+           #:do [(define t-op
+                   (parameterize ([current-language L])
+                     (check-productive-and-classify-unions (attribute pt.t) allow-raw?)))]
+           #:when t-op
+           #:attr t t-op))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Limp Terms
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define-syntax-class (Term-cls L)
+(define-syntax-class (Term-cls L ct)
   #:attributes (tm)
-  #:local-conventions ([#rx"^t" (Term-cls L)])
-  (pattern (#:set t ...) #:attr tm (Set #f (apply set (attribute t.tm))))
-  (pattern (#:map (~seq tk tv) ...)
-           #:attr tm (Map #f (for/hash ([k (in-list (attribute tk.tm))]
-                                            [v (in-list (attribute tv.tm))])
-                                   (values k v))))
-  (pattern (n:id t ...)
-           #:attr tm (Variant #f (syntax-e #'n) (attribute t.tm)))
-  (pattern (#:external name:id v)
-           #:attr tm (External (syntax-e #'name) #'v))
+  #:local-conventions ([#rx"^t" (Term-cls L #f)])
+  (pattern (~and sy (#:set t ...))
+           ;; XXX: set?
+           #:attr tm (Set #'sy ct (apply set (attribute t.tm))))
+  (pattern (~and sy (#:map (~seq tk tv) ...))
+           #:attr tm (Map #'sy ct (for/hash ([k (in-list (attribute tk.tm))]
+                                             [v (in-list (attribute tv.tm))])
+                                    (values k v))))
+  (pattern (~and sy (n:id t ...))
+           #:attr tm (Variant #'sy ct (syntax-e #'n) (attribute t.tm)))
+  (pattern (~and sy (#:external name:id v))
+           #:attr tm (External #'sy (syntax-e #'name) #'v))
+  ;; Annotate/cast
+  (pattern (#:ann (~var aty (Type-cls #t L)) (~var ta (Term-cls L (Check (attribute aty.t)))))
+           #:attr tm (attribute ta.tm))
+  (pattern (#:cast (~var cty (Type-cls #t L)) (~var tc (Term-cls L (Cast (attribute cty.t)))))
+           #:attr tm (attribute tc.tm))
   ;; Those didn't work. What about the external spaces?
   (pattern v
            #:do [(define ext
@@ -343,72 +350,81 @@ single address space
                                      (and p (p #'v))))
                      name))]
            #:when ext
-           #:attr tm (External ext #'v)))
+           #:attr tm (External #'v ext #'v)))
 
-(define-syntax-class (Expression-cls L)
+(define-syntax-class (Expression-cls L ct)
   #:attributes (e)
-  #:local-conventions ([#rx"^e" (Expression-cls L)]
+  #:local-conventions ([#rx"^e" (Expression-cls L #f)]
                        [#rx"^r" (Rule-cls #f L)])
-  (pattern (#:call f:id es ...)
+  (pattern (~and sy (#:call f:id (~or (~once (~seq #:tag tag:expr)) es) ...))
            ;; TODO: check f bound here?
-           #:attr e (ECall #f (syntax-e #'f) (attribute es.e)))
-  (pattern (#:lookup ek (~var ct (Compulsary-type-op L)))
-           #:attr e (EStore-lookup (or (attribute ct.t) T⊤) (attribute ek.e)))
-  (pattern (#:alloc (~var ops (EM-Modes-default (Language-options L) #t #t)))
-           #:attr e (EAlloc (TAddr (attribute ops.space) (attribute ops.mm) (attribute ops.em))
+           #:attr e (ECall #'sy #f (syntax-e #'f)
+                           (let ([t (attribute tag)]) (and t (syntax->datum t)))
+                           (attribute es.e)))
+  (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)))
+           #:attr e (EStore-lookup #'sy #f
+                                   (attribute ek.e)
+                                   (or (attribute mode.lm)
+                                       limp-default-lookup-mode)))
+  (pattern (~and sy (#:alloc (~var ops (EM-Modes-default (Language-options L) #t #t))))
+           #:attr e (EAlloc #'sy
+                            (TAddr #'ops
+                                   (attribute ops.space)
+                                   (attribute ops.mm)
+                                   (attribute ops.em)
+                                   #f)
                             (attribute ops.tag)))
-  (pattern (#:let [(~var bus (Binding-updates-cls L))] ebody)
-           #:attr e (ELet (Typed-ct (attribute ebody.e))
+  (pattern (~and sy (#:let [(~var bus (Binding-updates-cls L))] ebody))
+           #:attr e (ELet #'sy (Typed-ct (attribute ebody.e))
                           (attribute bus.bus)
                           (attribute ebody.e)))
-  (pattern (#:match edisc rules ...)
-           #:attr e (EMatch #f (attribute edisc.e)
+  (pattern (~and sy (#:match edisc rules ...))
+           #:attr e (EMatch #'sy #f (attribute edisc.e)
                             (attribute rules.rule)))
-  (pattern (#:extend em ek ev)
-           #:attr e (EExtend #f (attribute em.e) (attribute ek.e) (attribute ev.e)))
-  (pattern #:empty-map #:attr e (EEmpty-Map (TMap T⊥ T⊥ #f)))
-  (pattern [#:empty-map (~describe
-                         "Map type"
-                         (~and (~var ct (Compulsary-type-op L))
-                               (~fail #:unless
-                                      (match (attribute ct.t)
-                                        [(or (Check (? TMap?)) (Cast (? TMap?)))
-                                         #t]
-                                        [_ #f]))))]
-           #:attr e (EEmpty-Map (attribute ct.t)))
-  (pattern #:empty-set #:attr e (EEmpty-Set (TSet T⊥ #f)))
-  (pattern [#:empty-set (~describe
-                         "Set type"
-                         (~and (~var ct (Compulsary-type-op L))
-                               (~fail #:unless
-                                      (match (attribute ct.t)
-                                        [(or (Check (? TSet?)) (Cast (? TSet?)))
-                                         #t]
-                                        [_ #f]))))]
-           #:attr e (EEmpty-Set (attribute ct.t)))
-  (pattern (#:add es ev)
-           #:attr e (ESet-add #f (attribute es.e) (attribute ev.e)))
-  (pattern (n:id es ...)
-           #:attr e (EVariant (mk-TVariant (syntax-e #'n)
+  (pattern (~and sy (#:extend em (~optional (~seq #:tag tag:expr)) ek ev))
+           #:attr e (EExtend #'sy #f (attribute em.e)
+                             (let ([t (attribute tag)]) (and t (syntax->datum t)))
+                             (attribute ek.e)
+                             (attribute ev.e)))
+  (pattern (~and sy #:empty-map) #:attr e (EEmpty-Map #'sy (TMap T⊥ T⊥ #f)))
+  (pattern (~and sy #:empty-set) #:attr e (EEmpty-Set #'sy (TSet T⊥ #f)))
+  (pattern (~and sy (#:add es ev))
+           #:attr e (ESet-add #'sy #f (attribute es.e) (attribute ev.e)))
+  (pattern (~and sy (n:id (~or (~once (~seq #:tag tag:expr)) es) ...))
+           #:attr e (EVariant #'sy
+                              (mk-TVariant #'sy (syntax-e #'n)
                                            (map Typed-ct (attribute es.e)))
+                              (let ([t (attribute tag)]) (and t (syntax->datum t)))
                               (attribute es.e)))
   ;; TODO: use some binding environment? Check afterwards?
-  (pattern x:id #:attr e (ERef #f (syntax-e #'x)))
+  (pattern x:id #:attr e (ERef #'x #f (syntax-e #'x)))
 
   ;; Extra builtins
-  (pattern (#:union es ...) #:attr e (ESet-union #f (attribute es.e)))
-  (pattern (#:intersection e0 es ...) #:attr e (ESet-intersection #f (attribute e0.e) (attribute es.e)))
-  (pattern (#:subtract e0 es ...) #:attr e (ESet-subtract #f (attribute e0.e) (attribute es.e)))
-  (pattern (#:remove e0 ev) #:attr e (ESet-remove #f (attribute e0.e) (attribute ev.e)))
-  (pattern (#:member? es ev) #:attr e (ESet-member #f (attribute es.e) (attribute ev.e)))
-  (pattern (#:map-lookup em ek) #:attr e (EMap-lookup #f (attribute em.e) (attribute ek.e)))
-  (pattern (#:has-key? em ek) #:attr e (EMap-has-key #f (attribute em.e) (attribute ek.e)))
-  (pattern (#:map-remove em ek) #:attr e (EMap-remove #f (attribute em.e) (attribute ek.e))))
+  (pattern (~and sy (#:union es ...))
+           #:attr e (ESet-union #'sy #f (attribute es.e)))
+  (pattern (~and sy (#:intersection e0 es ...))
+           #:attr e (ESet-intersection #'sy #f (attribute e0.e) (attribute es.e)))
+  (pattern (~and sy (#:subtract e0 es ...))
+           #:attr e (ESet-subtract #'sy #f (attribute e0.e) (attribute es.e)))
+  (pattern (~and sy (#:remove e0 ev))
+           #:attr e (ESet-remove #'sy #f (attribute e0.e) (attribute ev.e)))
+  (pattern (~and sy (#:member? es ev))
+           #:attr e (ESet-member #'sy #f (attribute es.e) (attribute ev.e)))
+  (pattern (~and sy (#:map-lookup em ek)) #:attr e (EMap-lookup #'sy #f (attribute em.e) (attribute ek.e)))
+  (pattern (~and sy (#:has-key? em ek))
+           #:attr e (EMap-has-key #'sy #f (attribute em.e) (attribute ek.e)))
+  (pattern (~and sy (#:map-remove em ek))
+           #:attr e (EMap-remove #'sy #f (attribute em.e) (attribute ek.e)))
+  ;; Annotate/cast
+  (pattern (#:ann (~var t (Type-cls #t L)) (~var ea (Expression-cls L (Check (attribute t.t)))))
+           #:attr e (attribute ea.e))
+  (pattern (#:cast (~var t (Type-cls #t L)) (~var ec (Expression-cls L (Cast (attribute t.t)))))
+           #:attr e (attribute ec.e)))
 
 (define-syntax-class (Binding-update-cls L)
   #:attributes (bu)
-  #:local-conventions ([#rx"^e" (Expression-cls L)])
-  (pattern [#:where (~var p (Pattern-cls L)) e]
+  #:local-conventions ([#rx"^e" (Expression-cls L #f)])
+  (pattern [#:where (~var p (Pattern-cls L #f)) e]
            #:attr bu (Where (attribute p.pat) (attribute e.e)))
   (pattern [#:update ek ev]
            #:attr bu (Update (attribute ek.e) (attribute ev.e))))
@@ -421,12 +437,12 @@ single address space
 
 (define-syntax-class (Rule-cls arrow? L)
   #:attributes (rule)
-  (pattern [(~and #:rule (~fail #:unless arrow?))
-            (~optional (~seq #:name name:id))
-            (~var p (Pattern-cls L))
-            (~var e (Expression-cls L))
-            (~var bus (Binding-updates-cls L))]
-           #:attr rule (Rule (and (attribute name) (syntax-e #'name))
+  (pattern (~and sy [;;(~and #:rule (~fail #:unless arrow?))
+                     (~optional (~seq #:name name:id))
+                     (~var p (Pattern-cls L #f))
+                     (~var e (Expression-cls L #f))
+                     (~var bus (Binding-updates-cls L))])
+           #:attr rule (Rule #'sy (and (attribute name) (syntax-e #'name))
                              (attribute p.pat)
                              (attribute e.e)
                              (attribute bus.bus))))
@@ -503,27 +519,21 @@ Turn all free non-metavariables into external space names if they are bound.
                                (attribute u.trust?)
                                (attribute u.n))))
 
-(define-syntax-class (User-cls options ES meta-table space-info)
+(define-syntax-class (User-cls options Unames Enames meta-table space-info)
   #:attributes ((metas 1) name ty)
   #:description "Specify a user-defined value space"
   (pattern [(~optional (metas:id ...) #:defaults ([(metas 1) '()]))
             name:id
-            (~or (~seq #:full (~commit fty:TopPreType))
-                 (~commit (~seq sty:TopPreType ...)))
+            (~or (~seq #:full (~commit (~var fty (TopPreType Unames Enames meta-table))))
+                 (~commit (~seq (~var sty (TopPreType Unames Enames meta-table)) ...)))
             ;; shape only
             u:Unrolling]
            #:fail-when (and (attribute fty.t) (attribute u))
            "Cannot specify full type and use #:bounded, #:trust-construction, or #:unfold"
-           #:do [(define pre-ty (close-type-with
-                                 (if (attribute fty.t)
-                                     (attribute fty.t)
-                                     (*TRUnion (attribute sty.t)))
-                                 ES
-                                 meta-table
-                                 space-info
-                                 '()))]
-           #:fail-unless pre-ty
-           (format "Space's type contains free variables: ~a" (syntax-e #'name)) ;; TODO: give free variables
+           #:do [(define pre-ty (*TRUnion #'(sty ...) (attribute sty.t)))]
+           #:fail-unless (set-empty? (free pre-ty))
+           (format "Space's type contains free variables: ~a (~a)"
+                   (syntax-e #'name) (free pre-ty)) ;; TODO: give free variables
            #:attr ty pre-ty))
 
 (define-splicing-syntax-class Lang-options-cls
@@ -593,60 +603,73 @@ Turn all free non-metavariables into external space names if they are bound.
              (for/fold ([h h]) ([m (in-list metas)])
                (hash-set h (syntax-e m) name-sym)))
            #:attr uspace-info
-           (for/hash ([name (in-list (attribute unames))]
-                      [info (in-list (attribute usr.info))])
-             (values (syntax-e name) info))))
+           (let ([h (make-hasheq)])
+             (for ([name (in-list (attribute unames))]
+                   [info (in-list (attribute usr.info))])
+               (hash-set! h (syntax-e name) info))
+             h)))
 
-(define (contains-externalized? ts Γ)
+(define (contains-externalized? ts)
   (for/or ([t (in-list ts)])
-    (match (resolve t Γ)
-      [(or (TMap: _ _ ext) (TSet: _ ext)) ext]
+    (match (resolve t)
+      [(or (TMap: _ _ _ ext) (TSet: _ _ ext)) ext]
       [_ #f])))
 
-(define (any-union-contains-externalized? ty Γ)
+(define (any-union-contains-externalized? ty)
+  (define seen (mutable-seteq))
   (let check ([ty ty])
-   (match ty
-     [(or (Tμ: _ (Scope t) _ _ _) (TΛ: _ (Scope t)) (TSet: t _))
-      (check t)]
-     [(or (? T⊤?) (? TAddr?) (? TExternal?) (? TName?) (? TBound?) (? TFree?)) #f]
-     [(or (TSUnion: ts) (TRUnion: ts))
-      (or (contains-externalized? ts Γ)
-          (ormap check ts))]
-     [(TVariant: name ts r c) (ormap check ts)]
-     [(TCut: t* u) (check (resolve ty))]
-     [(TMap: t-dom t-rng _)
-      (or (check t-dom)
-          (check t-rng))])))
+    (if (set-member? seen ty)
+        #f
+        (begin
+          (set-add! seen ty)
+          (match ty
+            [(or (Tμ: _ _ (Scope t) _ _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
+             (check t)]
+            [(or (? T⊤?) (? TAddr?) (? TExternal?) (? TName?) (? TBound?) (? TFree?)) #f]
+            [(or (TSUnion: sy ts) (TRUnion: sy ts))
+             (if (contains-externalized? ts)
+                 (or sy #t)
+                 (ormap check ts))]
+            [(TVariant: _ name ts r c) (ormap check ts)]
+            [(TCut: _ t* u) (check (resolve ty))]
+            [(TMap: _ t-dom t-rng _)
+             (or (check t-dom)
+                 (check t-rng))])))))
 
 ;; Check that all occurrences of #:externalize are not in a union.
-(define (check-externalized stx Γ)
-  (for ([ty (in-hash-values Γ)])
-    (when (any-union-contains-externalized? ty Γ)
-      (raise-syntax-error #f (format "Cannot have externalized type in a union: ~a" ty) stx))))
+(define (check-externalized stx)
+  (for ([ty (in-hash-values (Language-user-spaces (current-language)))])
+    (displayln ty)
+    (define sy (any-union-contains-externalized? ty))
+    (when sy
+      (raise-syntax-error sy (format "Cannot have externalized type in a union: ~a" ty) stx))))
+
+(define (sset-map f s) (for/set ([u (in-set s)]) (f u)))
 
 (define (parse-language stx)
   (syntax-parse stx
     [(ops:Lang-options-cls . rest)
      (syntax-parse #'rest
        [gather:Language-externals/user-ids
-        (define rename-table
-          (for/fold ([h (attribute gather.meta-table)])
-              ([name (in-sequences
-                      (in-list (attribute gather.enames))
-                      (in-list (attribute gather.unames)))])
-            (define symbol (syntax-e name))
-            (hash-set h symbol symbol)))
+        (printf "Unames ~a~%Enames ~a~%" (attribute gather.unames) (attribute gather.enames))
         (syntax-parse #'rest
           [((~or (~var usr (User-cls (attribute ops.options)
-                                     (attribute gather.external-spaces)
-                                     rename-table
+                                     (sset-map syntax-e (attribute gather.unames))
+                                     (sset-map syntax-e (attribute gather.enames))
+                                     (attribute gather.meta-table)
                                      (attribute gather.uspace-info)))
                  :External-shape) ...)
-           (define pre-Γ
-             (for/hash ([space (in-list (attribute usr.name))]
-                        [ty (in-list (attribute usr.ty))])
-               (values (syntax-e space) ty)))
-           (check-externalized stx pre-Γ)
+           (define pre-Γ (make-hasheq))
+           (for ([space (in-list (attribute usr.name))]
+                 [ty (in-list (attribute usr.ty))])
+             (hash-set! pre-Γ (syntax-e space) ty))
+           (parameterize ([current-language (Language #f
+                                                      (attribute gather.external-spaces)
+                                                      #f
+                                                      pre-Γ
+                                                      #f
+                                                      #f)])
+             (check-externalized stx))
            #;
            (define level-names
              (produce-unfold-names pre-Γ (attribute gather.uspace-info)))
@@ -660,6 +683,7 @@ Turn all free non-metavariables into external space names if they are bound.
            (Language
             (attribute ops.options)
             (attribute gather.external-spaces)
+            ∅ ;; TODO: syntax for E<:
             categorized-and-guarded
             (attribute gather.meta-table)
             (attribute gather.uspace-info))])])]))
@@ -671,37 +695,17 @@ Turn all free non-metavariables into external space names if they are bound.
 (define (parse-metafunction stx L)
   (syntax-parse stx
     [(name:id (~datum :)
-              (~optional (~seq (~or #:∀ #:all) (ta:id ...)))
-              formals:TopPreType ... (~datum ->) ret:TopPreType
+              (~do (define unames (hash-key-set (Language-user-spaces L)))
+                   (define enames (hash-key-set (Language-external-spaces L)))
+                   (define meta-table (Language-meta-table L)))
+              (~optional (~seq (~or #:Λ #:∀ #:all) (ta:id ...)))
+              (~var formals (TopPreType unames enames meta-table))
+              ... (~datum ->) (~var ret (TopPreType unames enames meta-table))
               (~var r (Rule-cls #f L)) ...)
      ;; TODO: check that rules' patterns match (name args ...) for the type of name.
      (Metafunction (syntax-e #'name)
-                   (close-type-with
+                   (quantify-frees
                     (TArrow (TVariant (syntax-e #'name) (attribute formals.t) #f #f)
                             (attribute ret.t))
-                    (Language-external-spaces L)
-                    (Language-meta-table L)
-                    (Language-uspace-info L)
-                    ;; forall variables
-                    (if (attribute ta)
-                        (map syntax-e (attribute ta))
-                        '()))
+                    (rev-map syntax-e (attribute ta)))
                    (attribute r))]))
-
-(module+ test
-  (parse-language
-   #'([Expr (app Expr Expr) x (lam x Expr)]
-      [(x) #:external Name #:parse identifier?])))
-#|
- (Language '#hash((pun-space-names . #f) (require-metavariables . #f) (check-metavariables . #f) (match-mode . #f) (equality-mode . #f) (addr-space . #f) (include-pattern-namespace . #f))
-           '#hash((Name . #<ED>))
-           (hash 'Expr
-                 (TRUnion 12 #f #f #f 'unset
-                          (list (TVariant 10 #f #f #f 'unset 'lam
-                                          (list #0=(TExternal 8 #f #f #f 'unset 'Name)
-                                                #1=(TName 9 #f #f #f 'unset 'Expr #f)) #f #f)
-                                #0#
-                                (TVariant 11 #f #f #f 'unset 'app (list #1# #1#) #f #f))))
-           '#hasheq((x . Name))
-           '#hash((Expr . #(#f #f 0))))
-|#
