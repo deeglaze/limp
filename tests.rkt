@@ -1,7 +1,13 @@
 #lang racket/base
 (require rackunit racket/set syntax/parse racket/sandbox
          racket/pretty
-         "common.rkt" "language.rkt" "parser.rkt" "tast.rkt" "tc.rkt" "types.rkt")
+         "common.rkt"
+         "language.rkt"
+         "mkv.rkt"
+         "parser.rkt"
+         "tast.rkt"
+         "tc.rkt"
+         "types.rkt")
 
 (with-limits 10 1024
  (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()])
@@ -62,6 +68,7 @@
   (T⊤? (*TRUnion #f (list T⊤ foo-tt)))
   "Simplify union with ⊤")
 
+(type-print-verbosity 2)
 (pattern-print-verbosity 2)
 (expr-print-verbosity 2)
 
@@ -115,5 +122,18 @@
                                         (ev e (#:extend ρ x a) κ)
                                         [#:where a (#:alloc)]
                                         [#:update a v]])))
-  (pretty-print R)
-  (void)))
+    (check-true
+   (hash-ref (recursive-nonrecursive
+              (Language-user-spaces
+               (current-language)))
+             'List
+             #f)
+   "List is recursive")
+
+  (define R* (tc-rules #hash() #hash() R T⊤ T⊤))
+  (pretty-print R*)
+
+  (report-all-errors R*)
+
+  (language->mkV R* void)
+  ))

@@ -1,11 +1,13 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/syntax racket/base)
          racket/list racket/match racket/set
-         racket/trace
+         racket/string racket/trace
          "common.rkt" "language.rkt" "tast.rkt" "types.rkt")
 (provide tc-expr
          tc-pattern
-         tc-term)
+         tc-term
+         tc-rules
+         report-all-errors)
 
 ;; TODO: syntax location tracking and reporting
 (define ((unbound-mf sy who f))
@@ -15,7 +17,7 @@
 
 (define type-error-fn (make-parameter
                        (λ (fmt . args)
-                          (TError (list (apply format fmt args))))))
+                          (Check (TError (list (apply format fmt args)))))))
 (define-syntax-rule (type-error f e ...)
   ((type-error-fn) f e ...))
 
@@ -113,17 +115,8 @@
      ;; We expect e and pat to have overlapping types,
      ;; but one's type doesn't drive the other's checking.
      (define e* (tc-expr* e))
-     (define-values (Γ* pat*) (tc-pattern Γ Ξ pat))
-     (cond
-      [(type-overlap? (πcc e*) (πcc pat*))
-       (values Γ* (Where sy pat* e*))]
-      [else
-       (values Γ*
-               (Where sy pat*
-                      (replace-ct
-                       (type-error "Where clause has non-overlapping ~a: ~a"
-                                   "pattern and expression types" bu)
-                       e*)))])]))
+     (define-values (Γ* pat*) (tc-pattern Γ Ξ pat (πcc e*)))
+     (values Γ* (Where sy pat* e*))]))
 
 (define (type-overlap? τ τ-or-τs)
   (unless (Type? τ) (error 'type-overlap? "What? ~a" τ))
@@ -131,7 +124,6 @@
     ['() #f]
     [(cons σ σs) (and (type-overlap? τ σ) (type-overlap? τ σs))]
     [σ (not (T⊥? (type-meet τ σ)))]))
-(trace type-overlap?)
 
 (module+ test
   (check-true (type-overlap?
@@ -188,8 +180,9 @@
             ;; Name and length match due to type-meet
             (values τs bound? tr-c)]
            ;; XXX: is this the right behavior?
-           [_ (type-error "Given variant ~a with arity ~a, expected overlap with ~a"
-                          n len expect-overlap)]))
+           [_ (values (list (type-error "Given variant ~a with arity ~a, expected overlap with ~a"
+                                   n len expect-overlap))
+                      'dc 'dc)]))
 
        (let all ([Γ Γ] [ps ps] [exs expects] [τs-rev '()] [rev-ps* '()])
          (match* (ps exs)
@@ -236,7 +229,6 @@
       [(or (? PWild?) (? PIsExternal?) (? PIsAddr?) (? PIsType?))
        (values Γ (replace-ct (chk T⊤) pat))]
       [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
-  (trace tc)
   (tc Γ pat expect-overlap))
 
 
@@ -252,12 +244,22 @@
   (let check ([rules rules] [τ T⊥] [rev-rules* '()])
    (match rules
      ['() (values (reverse rev-rules*) τ)]
-     [(cons (Rule sy name lhs rhs bus) rules)
-      (define-values (Γ* lhs*) (tc-pattern Γ Ξ lhs expect-discr))
-      (define-values (Γ** bus*) (tc-bus Γ* Ξ bus))
-      (define rhs* ((tc-expr Γ** Ξ) rhs expected))
-      (check rules (type-join τ (πcc rhs*))
-             (cons (Rule sy name lhs* rhs* bus*) rev-rules*))])))
+     [(cons rule rules)
+      (define rule* (tc-rule Γ Ξ rule expect-discr expected))
+      (check rules
+             (type-join τ (πcc (Rule-rhs rule*)))
+             (cons rule* rev-rules*))])))
+
+(define (tc-rule Γ Ξ rule expect-discr expected)
+  (match-define (Rule sy name lhs rhs bus) rule)
+  (define-values (Γ* lhs*) (tc-pattern Γ Ξ lhs expect-discr))
+  (define-values (Γ** bus*) (tc-bus Γ* Ξ bus))
+  (define rhs* ((tc-expr Γ** Ξ) rhs expected))
+  (Rule sy name lhs* rhs* bus*))
+
+(define (tc-rules Γ Ξ rules expect-discr expected)
+  (for/list ([rule (in-list rules)])
+    (tc-rule Γ Ξ rule expect-discr expected)))
 
 ;; Γ : Variable names ↦ Type,
 ;; Ξ : metafunction names ↦ Type,
@@ -278,7 +280,7 @@
           ct
           (type-error "Expect ~a to have ~a type, got ~a" form ty σ)))
     (match e
-      [(ECall sy _ mf tag τs es)
+      [(ECall sy _ mf τs es)
        (define mfτ (hash-ref Ξ mf (unbound-mf sy 'tc-expr mf)))
        ;; instantiate with all given types, error if too many
        (define inst (repeat-inst mfτ τs))
@@ -301,18 +303,19 @@
          (for/list ([se (in-list es)]
                     [σ (in-list dom-σs)])
            (tc-expr* se σ)))
-       (ECall sy (chk rng) mf tag τs es*)]
+       (ECall sy (chk rng) mf τs es*)]
 
       [(EVariant sy _ n tag τs es)
        ;; Find all the n-named variants and find which makes sense.
        (define arity (length es))
        (define possible-σs (lang-variants-of-arity (generic-variant n arity)))
+       ;; FIXME: ad-hoc polymorphism should not collapse, but introduce multiple
+       ;; possible typings, so consumers might reject one typing but accept another.
        (define-values (τout ess*)
          (for/fold ([τ T⊥] [ess* '()])
              ([σ (in-list possible-σs)])
            (define vσ (let/ec break (repeat-inst σ τs (λ () (break #f)))))
            (match vσ
-             [#f (values τ ess*)]
              [(TVariant: _ _ σs _ _) ;; We know |σs| = |es| by possible-σs def.
               ;; expressions typecheck with a possible variant type?
               (define es*-op
@@ -325,7 +328,8 @@
                   ;; good, then it could be vσ too.
                   (values (type-join τ vσ) (cons es*-op ess*))
                   ;; well then it's not vσ.
-                  (values τ ess*))])))
+                  (values τ ess*))]
+             [_ (values τ ess*)])))
        ;; Each expression gets the joined type of its position.
        (define e-τs (make-vector arity T⊥))
        (for ([es (in-list ess*)])
@@ -339,7 +343,7 @@
        (EVariant sy (if (pair? ess*)
                         (chk τout)
                         (type-error "No variant type matched"))
-                 tag τs es*)]
+                 n tag τs es*)]
 
       [(ERef sy _ x)
        (ERef sy (chk (hash-ref Γ x (unbound-pat-var sy 'tc-expr x))) x)]
@@ -400,9 +404,123 @@
 
       [(ESet-subtract sy _ e es) (error 'tc-expr "Todo: set-subtract")]
       [(ESet-member sy _ e v) (error 'tc-expr "Todo: set-member?")]
-      [(EMap-lookup sy _ m k) (error 'tc-expr "Todo: map-lookup")]
+      [(EMap-lookup sy _ m k)
+       (define m* (tc-expr* m generic-map))
+       (match (type-meet (πcc m*) generic-map)
+         [(TMap: _ d r _)
+          (EMap-lookup (chk r) m* (tc-expr* k d))]
+         [τ (EMap-lookup sy (type-error "Expected a map type: ~a" τ)
+                         m* (tc-expr* k T⊤))])]
       [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]
       [(EMap-remove sy _ m k) (error 'tc-expr "Todo: map-remove")]
       [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
   (tc-expr* e expected))
-(trace tc-bus tc-pattern tc-term tc-expr)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Error reporting
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (raise-typecheck-error msg stxs)
+  (if (null? (cdr stxs))
+      (raise-syntax-error (string->symbol "Type Checker") msg (car stxs))
+      (raise-syntax-error (string->symbol "Type Checker") msg #f #f stxs)))
+
+(define error-list null)
+(struct err (msg stx) #:prefab)
+
+(define (report-rule-errors r)
+  (match-define (Rule _ name lhs rhs bus) r)
+  (report-pattern-errors lhs)
+  (for-each report-bu-errors bus)
+  (report-expression-errors rhs))
+
+(define (err-chk typed)
+  (define τ (πcc typed))
+  (when (TError? τ)
+    (set! error-list (cons (err (TError-msgs τ) (with-stx-stx typed)) error-list))))
+
+(define (report-pattern-errors pat)
+  (err-chk pat)
+  (match pat
+    [(or (PAnd _ _ ps) (PVariant _ _ _ ps)) (for-each report-pattern-errors ps)]
+    [(or (PMap-with _ _ k v p)
+         (PMap-with* _ _ k v p))
+     (report-pattern-errors k)
+     (report-pattern-errors v)
+     (report-pattern-errors p)]
+    [(or (PSet-with _ _ v p)
+         (PSet-with* _ _ v p))
+     (report-pattern-errors v)
+     (report-pattern-errors p)]
+    [(PTerm _ _ t) (report-term-errors t)]
+    [_ (void)]))
+
+(define (report-term-errors t)
+  (err-chk t)
+  (match t
+    [(Variant _ _ _ ts) (for-each report-term-errors ts)]
+    [(Map _ _ f) (for ([(k v) (in-hash f)])
+                   (report-term-errors k)
+                   (report-term-errors v))]
+    [(Set _ _ s) (for ([t (in-set s)]) (report-term-errors t))]
+    [_ (void)]))
+
+(define (report-bu-errors bu)
+  (match bu
+    [(Update _ k v)
+     (report-expression-errors k)
+     (report-expression-errors v)]
+    [(Where _ pat e)
+     (report-pattern-errors pat)
+     (report-expression-errors e)]))
+
+(define (report-expression-errors e)
+  (err-chk e)
+  (match e
+    [(or (ECall _ _ _ _ es)
+         (EVariant _ _ _ _ _ es)
+         (ESet-union _ _ es))
+     (for-each report-expression-errors es)]
+    [(EStore-lookup _ _ k _)
+     (report-expression-errors k)]
+    [(ELet _ _ bus body)
+     (for-each report-bu-errors bus)
+     (report-expression-errors body)]
+    [(EMatch _ _ de rules)
+     (report-expression-errors de)
+     (for-each report-rule-errors rules)]
+    [(EExtend _ _ m _ k v)
+     (report-expression-errors m)
+     (report-expression-errors k)
+     (report-expression-errors v)]
+    [(or (ESet-intersection _ _ e es)
+         (ESet-subtract _ _ e es))
+     (report-expression-errors e)
+     (for-each report-expression-errors es)]
+    [(or (ESet-member _ _ e0 e1)
+         (EMap-lookup _ _ e0 e1)
+         (EMap-has-key _ _ e0 e1)
+         (EMap-remove _ _ e0 e1))
+     (report-expression-errors e0)
+     (report-expression-errors e1)]
+    [_ (void)]))
+
+
+(define (report-all-errors v)
+  (set! error-list null)
+  (let populate ([v v])
+    (cond [(Rule? v) (report-rule-errors v)]
+          [(Expression? v) (report-expression-errors v)]
+          [(Pattern? v) (report-pattern-errors v)]
+          [(BU? v) (report-bu-errors v)]
+          [(list? v) (for-each populate v)]))
+  (define stxs
+    (for/list ([e (in-list (reverse error-list))])
+      (with-handlers ([exn:fail:syntax?
+                       (λ (e) ((error-display-handler) (exn-message e) e))])
+        (raise-typecheck-error (string-join (err-msg e) "\n") (list (err-stx e))))
+      (err-stx e)))
+  (set! error-list null)
+  (unless (null? stxs)
+    (raise-typecheck-error (format "Summary: ~a errors encountered" (length stxs))
+                           stxs)))

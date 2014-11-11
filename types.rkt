@@ -12,32 +12,44 @@
   (define v (type-print-verbosity))
   (let rec ([t t])
     (match t
-      [(or (TFree: _ x taddr) (TName: _ x taddr))
-       (if (and (> v 1) taddr)
-           `(ref$ ,x ,(rec taddr))
+      [(TName: _ x taddr)
+       (if (> v 1)
+           (if taddr
+               `(name$ ,x ,(rec taddr))
+               `(name$ ,x))
            x)]
-      [(or (and (Tμ: _ x st _ _ _) (app (λ _ 'μ) head))
-           (and (TΛ: _ x st) (app (λ _ 'Λ) head)))
+      [(TFree: _ x taddr)
+       (if (> v 1)
+           (if taddr
+               `(ref$ ,x ,(rec taddr))
+               `(ref$ ,x))
+           x)]
+      [(or (and (Tμ: _ x st _ _ _) (app (λ _ '#:μ) head))
+           (and (TΛ: _ x st) (app (λ _ '#:Λ) head)))
        `(,head ,x ,(rec (open-scope-hygienically st x)))]
        [(TVariant: _ name ts tr tc)
        (define base (cons name (map rec ts)))
        (if (> v 0)
            (append base
-                   (if tr '(#:bounded) '())
-                   (if tc '(#:trust-construction) '()))
+                   (if (eq? tr #t) '(#:bounded) '())
+                   (if (eq? tc #t) '(#:trust-construction) '()))
            base)]
-      [(or (and (TSUnion: _ ts) (app (λ _ '∪) head))
-           (and (TRUnion: _ ts) (app (λ _ 'raw∪) head))
+       [(? T⊥?) '⊥]
+      [(or (and (TSUnion: _ ts) (app (λ _ '#:∪) head))
+           (and (TRUnion: _ ts) (app (λ _ '#:r∪) head))
            (app (match-lambda [(TMap: _ d r _) (list '↦ d r)]
                               [(TSet: _ s _) (list '℘ s)]
                               [_ #f]) (cons head ts)))
        `(,head . ,(map rec ts))]
       [(TCut: _ s u)
-       (list (rec s) (rec u))]
+       `(#:inst ,(rec s) ,(rec u))]
       [(? T⊤?) '⊤]
-      [(TAddr: _ name mm em imp?) `(Addr ,name ,mm ,em ,imp?)]
-      [(TExternal: _ name) name]
-      [(TArrow: _ dom rng) `(-> ,(rec dom) ,(rec rng))]
+      [(TAddr: _ name mm em imp?) `(Addr ,name ,(s->k mm) ,(s->k em) ,imp?)]
+      [(TExternal: _ name)
+       (if (> v 0)
+           `(#:external ,name)
+           name)]
+      [(TArrow: _ dom rng) `(#:-> ,(rec dom) ,(rec rng))]
       [(TBound: _ i taddr) `(deb$ ,i)]
       ;; Non-types
       [(TUnif τ) `(Unif$ ,(rec τ))]
@@ -126,7 +138,7 @@
       [(TBound: _ i* taddr)
        (if (= i i*)
            (if (eq? t -addrize)
-               taddr
+               (or taddr t*)
                t)
            t*)]
       [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (open t (add1 i))) r c n)]
@@ -185,7 +197,12 @@
   (define conflict-res (name-conflict-res name #f))
   (let subst ([t t])
     (match t
-      [(TName: _ x _) (if (equal? x name) s t)]
+      [(TName: _ x taddr)
+       (if (equal? x name)
+           (if (eq? s -addrize)
+               taddr
+               s)
+           t)]
       [(Tμ: sy x (Scope t) r c n) (conflict-res (λ (x s) (mk-Tμ x s r c n)) sy t subst)]
       [(TΛ: sy x (Scope t)) (conflict-res mk-TΛ sy x t subst)]
       ;; boilerplate
@@ -198,12 +215,15 @@
       [(TSet: sy t ext) (mk-TSet sy (subst t) ext)]
       [_ (error 'subst-name "Bad type ~a" t)])))
 
-(define (abstract-free t name)
+(define (abstract-free t name [taddr* #f])
   (Scope
    (let abs ([t t] [i 0])
      (define (abs* t) (abs t i))
      (match t
-       [(TFree: sy x taddr) (if (equal? x name) (mk-TBound sy i taddr) t)]
+       [(TFree: sy x taddr)
+        (if (equal? x name)
+            (mk-TBound sy i (or taddr taddr*)) ;; override typing if there isn't already one.
+            t)]
        [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (abs t (add1 i))) r c n)]
        [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
        ;; boilerplate
@@ -223,7 +243,7 @@
     ;; boilerplate
     [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (freeze t)) r c n)]
     [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (freeze t)))]
-    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?)) t]
+    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
     ;; Resimplify, since unification may have bumped some stuff up.
     [(TSUnion: sy ts) (*TSUnion sy (map freeze ts))]
     [(TRUnion: sy ts) (*TRUnion sy (map freeze ts))]
@@ -235,14 +255,15 @@
 
 (define ff (cons #f #f))
 ;; Abstract inside-out. Give cosmetic names for better readability and equality checking.
-(define (quantify-frees t names #:names [name-names #f] #:stxs [stxs #f])
-  (let rec ([t t] [names names] [nnames (or name-names names)] [stxs stxs])
+(define (quantify-frees t names #:names [name-names #f] #:stxs [stxs #f] #:taddrs [taddrs #f])
+  (let rec ([t t] [names names] [nnames (or name-names names)] [stxs stxs] [taddrs taddrs])
    (match names
      ['() t]
      [(cons name names*)
       (match-define (cons name-name name-names*) nnames)
       (match-define (cons stx0 stxs*) (or stxs ff))
-      (rec (mk-TΛ stx0 name-name (abstract-free t name)) names* name-names* stxs*)]
+      (match-define (cons taddr taddrs*) (or taddrs ff))
+      (rec (mk-TΛ stx0 name-name (abstract-free t name taddr)) names* name-names* stxs* taddrs*)]
      [_ (error 'quantify-frees "Expected a list of names ~a" names)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -279,6 +300,20 @@
                   [_ ∅eq])])
         (set-Type-free! t t*)
         t*)))
+
+;; Which space names are mentioned?
+(define (names t)
+  (match t
+    [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _))
+     (for/unioneq ([t (in-list ts)]) (names t))]
+    [(or (TMap: _ d r _) (TCut: _ d r))
+     (set-union (names d) (names r))]
+    [(TName: _ x _) (seteq x)]
+    [(or (Tμ: _ _ (Scope t) _ _ _)
+         (TΛ: _ _ (Scope t))
+         (TSet: _ t _))
+     (names t)]
+    [_ ∅eq]))
 
 (define (mono-type? t)
   (let coind ([A ∅eq] [t t])
@@ -370,28 +405,40 @@
 (define (needs-resolve? τ)
   (or (TName? τ) (Tμ? τ) (TCut? τ) (TUnif? τ)))
 
+(define limp-default-Λ-addr
+  (mk-TAddr #f
+            limp-default-addr-space
+            limp-default-mm
+            limp-default-em
+            #t))
+
 ;; resolve : Type Map[Name,Type] -> Maybe[Type]
-(define (resolve t [extra-Γ #f])
+(define (resolve t [extra-Γ #f] #:addrize [rec-spaces #hasheq()])
   (define Γ (Language-user-spaces (current-language)))
   (define Γcount (+ (hash-count Γ) (if extra-Γ (hash-count extra-Γ) 0)))
+  (define orig t)
   (let reset ([t t])
-    (let fuel ([t t] [i Γcount])
-      (and (< 0 i)
-           (match t
-             [(TName: sy x taddr)
-              (match (hash-ref Γ x #f)
-                [#f (mk-TName sy (hash-ref extra-Γ x) taddr)]
-                [τ (fuel τ (sub1 i))])]
-             [(Tμ: sy x st r c n)
-              ;; INVARIANT: the only μs at this point are trusted.
-              (unless (or r c) (error 'resolve "Unfolds should be resolved first: ~a" t))
-              (fuel (open-scope st t) (sub1 i))]
-             [(TCut: _ t* u)
-              (match (reset t*)
-                [(TΛ: _ _ st) (reset (open-scope st u))]
-                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
-             [(TUnif τ) (reset τ)]
-             [_ t])))))
+    (let fuel ([t t] [i (add1 Γcount)])
+      (if (< 0 i)
+          (match t
+            [(TName: sy x taddr)
+             (match (hash-ref rec-spaces x #f)
+               [#f
+                (match (hash-ref Γ x #f)
+                  [#f (mk-TName sy (hash-ref extra-Γ x) taddr)]
+                  [τ (fuel τ (sub1 i))])]
+               [#t (or taddr limp-default-Λ-addr)])]
+            [(Tμ: sy x st r c n)
+             ;; INVARIANT: the only μs at this point are trusted.
+             (unless (or r c) (error 'resolve "Unfolds should be resolved first: ~a" t))
+             (fuel (open-scope st t) (sub1 i))]
+            [(TCut: _ t* u)
+             (match (reset t*)
+               [(TΛ: _ _ st) (reset (open-scope st u))]
+               [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
+            [(TUnif τ) (reset τ)]
+            [_ t])
+          (error 'resolve "Circular reference: ~a" orig)))))
 
 (define-syntax seq
   (syntax-rules ()
@@ -569,7 +616,7 @@
                     (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1))
                     (or (eq? tc0 'dc) (eq? tc1 'dc) (equal? tc0 tc1)))
         (*TVariant #f n (for/list ([τ (in-list τs)]
-                                     [σ (in-list σs)])
+                                   [σ (in-list σs)])
                             (⊓ τ σ ρ))
                      (⊓b tr1 tr0)
                      (⊓b tc1 tc0))]
@@ -589,11 +636,9 @@
        [(_ (? TUnif?)) (unify σ τ)]
        ;; distribute unions
        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
-        (printf "Dist left ~a, ~a~%" ts σ)
         (*TRUnion #f (for/list ([t (in-list ts)])
                        (⊓ t σ ρ)))]
        [(_ (or (TRUnion: _ ts) (TSUnion: _ ts)))
-        (printf "Dist right ~a, ~a~%" ts τ)
         (*TRUnion #f (for/list ([t (in-list ts)])
                        (⊓ τ t ρ)))]
        ;; map and set are structural
@@ -623,7 +668,6 @@
        [((? TCut?) _) (⊓ (resolve τ ρ) σ ρ)]
        [(_ (? TCut?)) (⊓ τ (resolve σ ρ) ρ)]
        [(_ _) T⊥])]))
-  (trace ⊓)
   (freeze (⊓ τ σ #hasheq())))
 
 ;; τ is castable to σ if τ <: σ, τ = ⊤,
@@ -719,7 +763,6 @@
           [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
           [_ found])]))
     (collect τ '() '() found)))
-(trace lang-variants-of-arity)
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

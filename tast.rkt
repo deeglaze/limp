@@ -1,5 +1,5 @@
 #lang racket/base
-(require racket/match racket/set "types.rkt")
+(require racket/match racket/set "common.rkt" "types.rkt")
 #|
 This module provides the structs that the Limp compiler uses to typecheck an input language
 and semantics.
@@ -55,7 +55,7 @@ and semantics.
                                             ,(rec p))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
         [(PIsExternal _ (Check (TExternal: _ name))) `(#:is-external ,name)]
-        [(PIsAddr _ (Check (TAddr: _ space mm em _))) `(#:is-addr ,space ,mm ,em)]
+        [(PIsAddr _ (Check (TAddr: _ space mm em _))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
         [(PIsType _ (Check τ)) `(#:is-type ,τ)] ;; printer will handle τ
         [_ `(error$ ,(format "Unsupported pattern: ~a" p))]))
     (case v
@@ -160,6 +160,7 @@ Template:
 
 ;; Elaborated Terms
 (define (term->sexp t)
+  ;; TODO: annotations based on verbosity.
   (match t
     [(Variant sy ct n ts) `(,n . ,(map term->sexp ts))]
     [(Map sy ct f) (for/fold ([t '#:empty-map])
@@ -226,11 +227,12 @@ template
   (let rec ([e e])
     (define sexp
       (match e
-        [(ECall _ _ mf tag τs es) `(,mf ,@(do-tag tag) . ,(map rec es))]
+        [(ECall _ _ mf τs es) `(,mf . ,(map rec es))]
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
-        [(EStore-lookup _ _ k lm) `(#:lookup ,(rec k) ,lm)]
-        [(EAlloc _ (Check (TAddr: _ space mm em _)) tag) `(#:alloc ,@(do-tag tag) ,space ,mm ,em)]
+        [(EStore-lookup _ _ k lm) `(#:lookup ,(rec k) ,(s->k lm))]
+        [(EAlloc _ (Check (TAddr: _ space mm em _)) tag)
+         `(#:alloc ,@(do-tag tag) ,space ,(s->k mm) ,(s->k em))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
         [(EMatch _ _ de rules) `(#:match ,(rec de) . ,(map (rule->sexp #f) rules))]
         [(EExtend _ _ m tag k v)
@@ -253,7 +255,7 @@ template
 
 (define (expr-replace-ct ct e)
   (match e
-    [(ECall sy _ mf tag τs es) (ECall sy ct mf tag τs es)]
+    [(ECall sy _ mf τs es) (ECall sy ct mf τs es)]
     [(EVariant sy _ n tag τs es) (EVariant sy ct n tag τs es)]
     [(ERef sy _ x) (ERef sy ct x)]
     [(EStore-lookup sy _ k lm) (EStore-lookup sy ct k lm)]
@@ -278,7 +280,7 @@ template
 ;; Expressions
 (struct Expression Typed () #:transparent
         #:methods gen:custom-write [(define write-proc write-expr)])
-(struct ECall Expression (mf tag τs es) #:transparent)
+(struct ECall Expression (mf τs es) #:transparent)
 (struct EVariant Expression (n tag τs es) #:transparent)
 (struct ERef Expression (x) #:transparent)
 (struct EStore-lookup Expression (k lm) #:transparent) ;; lm ::= 'resolve | 'delay | 'deref
@@ -301,7 +303,7 @@ template
 #|
 Template
  (match e
-    [(ECall sy ct mf tag τs es) ???]
+    [(ECall sy ct mf τs es) ???]
     [(EVariant sy ct n tag τs es) ???]
     [(ERef sy ct x) ???]
     [(EStore-lookup sy ct k lm) ???]
@@ -330,8 +332,8 @@ Template
     ;; ct, τs uses type equality after structural equality.
     ;; mf and tag must be `equal?`
     ;; es0 and es1 need recursion
-    [((ECall _ ct mf tag τs es0)
-      (ECall _ ct mf tag τs es1))
+    [((ECall _ ct mf τs es0)
+      (ECall _ ct mf τs es1))
      (equal*? es0 es1)]
     [((EVariant _ ct n tag τs es0)
       (EVariant _ ct n tag τs es1))
@@ -410,9 +412,10 @@ Template
 (define (write-bu bu port mode)
   (display (bu->sexp bu) port))
 
-(struct Update with-stx (k v) #:transparent
+(struct BU with-stx () #:transparent)
+(struct Update BU (k v) #:transparent
         #:methods gen:custom-write [(define write-proc write-bu)])
-(struct Where with-stx (pat e) #:transparent
+(struct Where BU (pat e) #:transparent
         #:methods gen:custom-write [(define write-proc write-bu)])
 
 (define (rule->sexp arrow?)
@@ -421,7 +424,8 @@ Template
                  `(,@head ,@(if name `(#:name ,name) '())
                           ,(pattern->sexp lhs)
                           ,(expr->sexp rhs)
-                          . ,(map bu->sexp bus))]))
+                          . ,(map bu->sexp bus))]
+                [_ #f]))
 
 (define (write-rule r port mode)
   (display ((rule->sexp #t) r) port))

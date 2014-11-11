@@ -6,7 +6,8 @@
          "language.rkt"
          "tast.rkt"
          "types.rkt"
-         racket/pretty)
+         racket/pretty
+         racket/trace)
 (provide parse-language
          parse-reduction-relation
          TopPreType ClosedTopPreType
@@ -99,6 +100,17 @@ single address space
                             limp-default-addr-space)
            #:attr tag (attribute modes.tag)))
 
+(define (->ref x Unames Enames meta-table taddr)
+  (let* ([sym (syntax-e x)]
+         [sym (hash-ref meta-table sym sym)])
+    (cond
+     [(set-member? Unames sym)
+      (mk-TName x sym taddr)]
+     [(set-member? Enames sym)
+      (mk-TExternal x sym)]
+     [else
+      (mk-TFree x sym taddr)])))
+
 (define-syntax-class (PreType bounded? trust? Unames Enames meta-table)
   #:attributes (t)
   #:local-conventions ([#rx"^t" (PreType bounded? trust? Unames Enames meta-table)])
@@ -107,7 +119,8 @@ single address space
             tbody)
            #:attr t (quantify-frees (attribute tbody.t)
                                     (reverse (syntax->datum #'(xs ...)))
-                                    #:stxs (attribute xs)))
+                                    #:stxs (attribute xs)
+                                    #:taddrs (map (λ _ limp-default-Λ-addr) (attribute xs))))
   (pattern (~and sy
                  (#:μ x:id (~var ty:expr) u:Unrolling
                       (~parse (~var tbody (PreType (attribute u.bounded?)
@@ -146,26 +159,17 @@ single address space
                                  bounded?
                                  trust?))
   (pattern x:id #:attr t
-           (let* ([sym (syntax-e #'x)]
-                  [sym (hash-ref meta-table sym sym)])
-             (cond
-              [(set-member? Unames sym)
-               (mk-TName #'x sym #f)]
-              [(set-member? Enames sym)
-               (mk-TExternal #'x sym)]
-              [else
-               (mk-TFree #'x (syntax-e #'x) #f)])))
+           (->ref #'x Unames Enames meta-table #f))
   (pattern [#:ref x:id (~var modes (EM-Modes #t #f))]
            #:fail-unless (and (attribute modes.mm)
                               (attribute modes.em)
                               (attribute modes.space))
            "Must specify both match-mode and equality-mode"
-           #:attr t (mk-TFree #'x
-                              (syntax-e #'x)
-                              (mk-TAddr (attribute modes.space)
-                                        (attribute modes.mm) 
-                                        (attribute modes.em)
-                                        #t)))
+           #:attr t (->ref #'x Unames Enames meta-table
+                           (mk-TAddr (attribute modes.space)
+                                     (attribute modes.mm) 
+                                     (attribute modes.em)
+                                     #t)))
   (pattern (~or #:⊤ #:top #:any) #:attr t T⊤)
   (pattern 3d #:when (Type? (syntax-e #'3d)) #:attr t (syntax-e #'3d)))
 
@@ -258,7 +262,7 @@ single address space
   #:attributes (pat)
   #:local-conventions ([#rx"^p" (Pattern-cls L #f)])
   (pattern (~and sy :Wild)
-           #:attr pat (PWild #'sy (or ct T⊤)))
+           #:attr pat (PWild #'sy ct))
   (pattern (~and sy ((~var _ (pand L)) p ...))
            #:attr pat (PAnd #'sy ct (attribute p.pat)))
   (pattern (~and sy ((~var _ (pmapwith L)) pk pv pm))
@@ -284,6 +288,8 @@ single address space
   (pattern (~and sy ((~var _ (paddr L)) name:id
                      (~var modes (EM-Modes-default (Language-options L) #f #f))))
            #:attr pat (PIsAddr #'sy
+                               ;; FIXME: actually check that ct and the given taddr are the same
+                               ;; since a mismatch is an error.
                                (or ct
                                    (Check
                                     (mk-TAddr #'modes (syntax-e #'name)
@@ -293,7 +299,7 @@ single address space
   (pattern (~and sy ((~var _ (pexternal L)) name:id))
            #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
            #:attr pat (PIsExternal #'sy
-                                   (or ct
+                                   (or ct ;; FIXME: same as above
                                        (Check
                                         (mk-TExternal #'name (syntax-e #'name))))))
   (pattern (~and sy (n:id p ...))
@@ -302,7 +308,8 @@ single address space
            #:attr pat (PTerm #'sy ct (attribute t.tm)))
   (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L))))
            #:when (mono-type? (attribute t.t))
-           #:attr pat (PIsType #'sy (or ct (Check (attribute t.t)))))
+           #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
+                                        (Check (attribute t.t)))))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))
@@ -359,11 +366,9 @@ single address space
   #:attributes (e)
   #:local-conventions ([#rx"^e" (Expression-cls L #f)]
                        [#rx"^r" (Rule-cls #f L)])
-  (pattern (~and sy (#:call f:id (~or (~optional (~seq #:tag tag:expr)) es) ...))
+  (pattern (~and sy (#:call f:id es ...))
            ;; TODO: check f bound here?
-           #:attr e (ECall #'sy ct (syntax-e #'f)
-                           (let ([t (attribute tag)]) (and t (syntax->datum t)))
-                           (attribute es.e)))
+           #:attr e (ECall #'sy ct (syntax-e #'f) (attribute es.e)))
   (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)))
            #:attr e (EStore-lookup #'sy ct
                                    (attribute ek.e)
@@ -371,7 +376,7 @@ single address space
                                        limp-default-lookup-mode)))
   (pattern (~and sy (#:alloc (~var ops (EM-Modes-default (Language-options L) #t #t))))
            #:attr e (EAlloc #'sy
-                            (or ct
+                            (or ct ;; FIXME: same as above
                                 (Check (mk-TAddr #'ops
                                                  (attribute ops.space)
                                                  (attribute ops.mm)
@@ -380,7 +385,8 @@ single address space
                             (attribute ops.tag)))
   (pattern (~and sy (#:let [(~var bus (Binding-updates-cls L))] ebody))
            #:attr e (ELet #'sy
-                          (or ct (Typed-ct (attribute ebody.e)))
+                          (or ct
+                              (Typed-ct (attribute ebody.e)))
                           (attribute bus.bus)
                           (attribute ebody.e)))
   (pattern (~and sy (#:match edisc rules ...))
@@ -397,11 +403,7 @@ single address space
            #:attr e (ESet-add #'sy ct (attribute es.e) (attribute ev.e)))
   (pattern (~and sy (n:id (~or (~optional (~seq #:tag tag:expr)) es) ...))
            #:attr e (EVariant #'sy
-                              (or ct
-                                  (Check (mk-TVariant #'sy (syntax-e #'n)
-                                                      (map πcc (attribute es.e))
-                                                      ;; Not sure which type it is.
-                                                      'dc 'dc)))
+                              ct
                               (syntax-e #'n)
                               (let ([t (attribute tag)]) (and t (syntax->datum t)))
                               '() ;; Type instantiations?

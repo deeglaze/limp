@@ -1,6 +1,7 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/base racket/syntax syntax/for-body)
-         racket/set racket/match)
+         racket/set racket/match
+         racket/trace)
 (provide (all-defined-out))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Common utils
@@ -36,3 +37,6 @@
     (match l
       ['() acc]
       [(cons x l) (rec l (cons (f x) acc))])))
+
+;; symbol->keyword
+(define (s->k s) (string->keyword (symbol->string s)))
