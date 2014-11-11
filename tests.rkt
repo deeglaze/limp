@@ -1,5 +1,6 @@
 #lang racket/base
 (require rackunit racket/set syntax/parse racket/sandbox
+         racket/pretty
          "common.rkt" "language.rkt" "parser.rkt" "tast.rkt" "tc.rkt" "types.rkt")
 
 (with-limits 10 1024
@@ -61,6 +62,9 @@
   (T⊤? (*TRUnion #f (list T⊤ foo-tt)))
   "Simplify union with ⊤")
 
+(pattern-print-verbosity 2)
+(expr-print-verbosity 2)
+
  ;; Fails because simplification doesn't heed language
  (parameterize ([current-language
                  (Language #hash() #hash() ∅ us-test #hash() (make-hash))])
@@ -70,12 +74,16 @@
          (quantify-frees foo-a-list-a '(a)))
     "Simplified")
 
-   (define Γ (hasheq 'x (parse-type #'(#:inst Cord (bloo) (blah)) (set 'List 'Blor 'Cord))))
-   (check-equal?
+   (define xτ (parse-type #'(#:inst Cord (bloo) (blah)) (set 'List 'Blor 'Cord)))
+   (define Γ (hasheq 'x xτ))
+   (check expr-α-equal?
     ((tc-expr Γ #hasheq())
      (parse-expr #'(#:match x [(foo y z) z])))
-    (parse-type #'(blah)))
-   )
+    (parse-expr #'(#:ann (blah) (#:match (#:ann (#:inst Cord (bloo) (blah)) x)
+                                         [(#:ann (foo (bloo) (blah))
+                                                 (foo (#:ann (bloo) y)
+                                                      (#:ann (blah) z)))
+                                          (#:ann (blah) z)])))))
 
 (parameterize ([current-language
                 (parse-language
@@ -89,4 +97,23 @@
                     [State (ev Expr Env Kont)
                            (co Kont Value)
                            (ap x Expr Env Value Kont)]))])
+  (define R
+    (parse-reduction-relation #'([#:--> (ev (app e0 e1) ρ κ)
+                                        (ev e0 ρ (Cons (ar e1 ρ) κ))]
+                                 [#:--> (ev (lam x e) ρ κ)
+                                        (co κ (Clo x e ρ))]
+                                 [#:--> #:name var-lookup
+                                        (ev (#:cast Name x) ρ κ)
+                                        (co κ (#:lookup (#:map-lookup ρ x)))]
+
+                                 [#:--> (co (Cons (ar e ρ) κ) v)
+                                        (ev e ρ (Cons (fn v) κ))]
+                                 [#:--> (co (Cons (fn (Clo x e ρ)) κ) v)
+                                        (ap x e ρ v κ)]
+
+                                 [#:--> (ap x e ρ v κ)
+                                        (ev e (#:extend ρ x a) κ)
+                                        [#:where a (#:alloc)]
+                                        [#:update a v]])))
+  (pretty-print R)
   (void)))

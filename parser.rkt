@@ -150,13 +150,10 @@ single address space
                   [sym (hash-ref meta-table sym sym)])
              (cond
               [(set-member? Unames sym)
-               (printf "User ~a~%" sym)
                (mk-TName #'x sym #f)]
               [(set-member? Enames sym)
-               (printf "External ~a~%" sym)
                (mk-TExternal #'x sym)]
               [else
-               (printf "Free ~a~%" sym)
                (mk-TFree #'x (syntax-e #'x) #f)])))
   (pattern [#:ref x:id (~var modes (EM-Modes #t #f))]
            #:fail-unless (and (attribute modes.mm)
@@ -165,10 +162,10 @@ single address space
            "Must specify both match-mode and equality-mode"
            #:attr t (mk-TFree #'x
                               (syntax-e #'x)
-                              (TAddr (attribute modes.space)
-                                     (attribute modes.mm) 
-                                     (attribute modes.em)
-                                     #t)))
+                              (mk-TAddr (attribute modes.space)
+                                        (attribute modes.mm) 
+                                        (attribute modes.em)
+                                        #t)))
   (pattern (~or #:⊤ #:top #:any) #:attr t T⊤)
   (pattern 3d #:when (Type? (syntax-e #'3d)) #:attr t (syntax-e #'3d)))
 
@@ -279,27 +276,33 @@ single address space
                                     (attribute pv.pat)
                                     (attribute ps.pat)))
   (pattern (~and sy ((~var _ (psetwith* L)) pv ps))
-           #:attr pat (PSet-with* #'sy #f
+           #:attr pat (PSet-with* #'sy ct
                                     (attribute pv.pat)
                                     (attribute ps.pat)))
   (pattern (~and sy ((~var _ (pname L)) x:id))
            #:attr pat (PName #'sy ct (syntax-e #'x)))
   (pattern (~and sy ((~var _ (paddr L)) name:id
                      (~var modes (EM-Modes-default (Language-options L) #f #f))))
-           #:attr pat (PIsAddr #'sy (TAddr #'modes (syntax-e #'name)
-                                       (attribute modes.mm)
-                                       (attribute modes.em)
-                                       #f)))
+           #:attr pat (PIsAddr #'sy
+                               (or ct
+                                   (Check
+                                    (mk-TAddr #'modes (syntax-e #'name)
+                                              (attribute modes.mm)
+                                              (attribute modes.em)
+                                              #f)))))
   (pattern (~and sy ((~var _ (pexternal L)) name:id))
            #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
-           #:attr pat (PIsExternal #'sy (mk-TExternal #'name (syntax-e #'name))))
+           #:attr pat (PIsExternal #'sy
+                                   (or ct
+                                       (Check
+                                        (mk-TExternal #'name (syntax-e #'name))))))
   (pattern (~and sy (n:id p ...))
            #:attr pat (PVariant #'sy ct (syntax-e #'n) (attribute p.pat)))
   (pattern (~and sy ((~var _ (pterm L)) (~var t (Term-cls L #f))))
            #:attr pat (PTerm #'sy ct (attribute t.tm)))
   (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L))))
            #:when (mono-type? (attribute t.t))
-           #:attr pat (PIsType #'sy (attribute t.t)))
+           #:attr pat (PIsType #'sy (or ct (Check (attribute t.t)))))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))
@@ -356,65 +359,72 @@ single address space
   #:attributes (e)
   #:local-conventions ([#rx"^e" (Expression-cls L #f)]
                        [#rx"^r" (Rule-cls #f L)])
-  (pattern (~and sy (#:call f:id (~or (~once (~seq #:tag tag:expr)) es) ...))
+  (pattern (~and sy (#:call f:id (~or (~optional (~seq #:tag tag:expr)) es) ...))
            ;; TODO: check f bound here?
-           #:attr e (ECall #'sy #f (syntax-e #'f)
+           #:attr e (ECall #'sy ct (syntax-e #'f)
                            (let ([t (attribute tag)]) (and t (syntax->datum t)))
                            (attribute es.e)))
   (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)))
-           #:attr e (EStore-lookup #'sy #f
+           #:attr e (EStore-lookup #'sy ct
                                    (attribute ek.e)
                                    (or (attribute mode.lm)
                                        limp-default-lookup-mode)))
   (pattern (~and sy (#:alloc (~var ops (EM-Modes-default (Language-options L) #t #t))))
            #:attr e (EAlloc #'sy
-                            (TAddr #'ops
-                                   (attribute ops.space)
-                                   (attribute ops.mm)
-                                   (attribute ops.em)
-                                   #f)
+                            (or ct
+                                (Check (mk-TAddr #'ops
+                                                 (attribute ops.space)
+                                                 (attribute ops.mm)
+                                                 (attribute ops.em)
+                                                 #f)))
                             (attribute ops.tag)))
   (pattern (~and sy (#:let [(~var bus (Binding-updates-cls L))] ebody))
-           #:attr e (ELet #'sy (Typed-ct (attribute ebody.e))
+           #:attr e (ELet #'sy
+                          (or ct (Typed-ct (attribute ebody.e)))
                           (attribute bus.bus)
                           (attribute ebody.e)))
   (pattern (~and sy (#:match edisc rules ...))
-           #:attr e (EMatch #'sy #f (attribute edisc.e)
+           #:attr e (EMatch #'sy ct (attribute edisc.e)
                             (attribute rules.rule)))
   (pattern (~and sy (#:extend em (~optional (~seq #:tag tag:expr)) ek ev))
-           #:attr e (EExtend #'sy #f (attribute em.e)
+           #:attr e (EExtend #'sy ct (attribute em.e)
                              (let ([t (attribute tag)]) (and t (syntax->datum t)))
                              (attribute ek.e)
                              (attribute ev.e)))
   (pattern (~and sy #:empty-map) #:attr e (EEmpty-Map #'sy (TMap T⊥ T⊥ #f)))
   (pattern (~and sy #:empty-set) #:attr e (EEmpty-Set #'sy (TSet T⊥ #f)))
   (pattern (~and sy (#:add es ev))
-           #:attr e (ESet-add #'sy #f (attribute es.e) (attribute ev.e)))
-  (pattern (~and sy (n:id (~or (~once (~seq #:tag tag:expr)) es) ...))
+           #:attr e (ESet-add #'sy ct (attribute es.e) (attribute ev.e)))
+  (pattern (~and sy (n:id (~or (~optional (~seq #:tag tag:expr)) es) ...))
            #:attr e (EVariant #'sy
-                              (mk-TVariant #'sy (syntax-e #'n)
-                                           (map Typed-ct (attribute es.e)))
+                              (or ct
+                                  (Check (mk-TVariant #'sy (syntax-e #'n)
+                                                      (map πcc (attribute es.e))
+                                                      ;; Not sure which type it is.
+                                                      'dc 'dc)))
+                              (syntax-e #'n)
                               (let ([t (attribute tag)]) (and t (syntax->datum t)))
+                              '() ;; Type instantiations?
                               (attribute es.e)))
   ;; TODO: use some binding environment? Check afterwards?
-  (pattern x:id #:attr e (ERef #'x #f (syntax-e #'x)))
+  (pattern x:id #:attr e (ERef #'x ct (syntax-e #'x)))
 
   ;; Extra builtins
   (pattern (~and sy (#:union es ...))
-           #:attr e (ESet-union #'sy #f (attribute es.e)))
+           #:attr e (ESet-union #'sy ct (attribute es.e)))
   (pattern (~and sy (#:intersection e0 es ...))
-           #:attr e (ESet-intersection #'sy #f (attribute e0.e) (attribute es.e)))
+           #:attr e (ESet-intersection #'sy ct (attribute e0.e) (attribute es.e)))
   (pattern (~and sy (#:subtract e0 es ...))
-           #:attr e (ESet-subtract #'sy #f (attribute e0.e) (attribute es.e)))
+           #:attr e (ESet-subtract #'sy ct (attribute e0.e) (attribute es.e)))
   (pattern (~and sy (#:remove e0 ev))
-           #:attr e (ESet-remove #'sy #f (attribute e0.e) (attribute ev.e)))
+           #:attr e (ESet-remove #'sy ct (attribute e0.e) (attribute ev.e)))
   (pattern (~and sy (#:member? es ev))
-           #:attr e (ESet-member #'sy #f (attribute es.e) (attribute ev.e)))
-  (pattern (~and sy (#:map-lookup em ek)) #:attr e (EMap-lookup #'sy #f (attribute em.e) (attribute ek.e)))
+           #:attr e (ESet-member #'sy ct (attribute es.e) (attribute ev.e)))
+  (pattern (~and sy (#:map-lookup em ek)) #:attr e (EMap-lookup #'sy ct (attribute em.e) (attribute ek.e)))
   (pattern (~and sy (#:has-key? em ek))
-           #:attr e (EMap-has-key #'sy #f (attribute em.e) (attribute ek.e)))
+           #:attr e (EMap-has-key #'sy ct (attribute em.e) (attribute ek.e)))
   (pattern (~and sy (#:map-remove em ek))
-           #:attr e (EMap-remove #'sy #f (attribute em.e) (attribute ek.e)))
+           #:attr e (EMap-remove #'sy ct (attribute em.e) (attribute ek.e)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var ea (Expression-cls L (Check (attribute t.t)))))
            #:attr e (attribute ea.e))
@@ -424,10 +434,10 @@ single address space
 (define-syntax-class (Binding-update-cls L)
   #:attributes (bu)
   #:local-conventions ([#rx"^e" (Expression-cls L #f)])
-  (pattern [#:where (~var p (Pattern-cls L #f)) e]
-           #:attr bu (Where (attribute p.pat) (attribute e.e)))
-  (pattern [#:update ek ev]
-           #:attr bu (Update (attribute ek.e) (attribute ev.e))))
+  (pattern (~and sy [#:where (~var p (Pattern-cls L #f)) e])
+           #:attr bu (Where #'sy (attribute p.pat) (attribute e.e)))
+  (pattern (~and sy [#:update ek ev])
+           #:attr bu (Update #'sy (attribute ek.e) (attribute ev.e))))
 
 (define-splicing-syntax-class (Binding-updates-cls L)
   #:attributes (bus)
@@ -437,11 +447,16 @@ single address space
 
 (define-syntax-class (Rule-cls arrow? L)
   #:attributes (rule)
-  (pattern (~and sy [;;(~and #:rule (~fail #:unless arrow?))
+  (pattern (~and sy [(~optional (~and #:--> arrow))
                      (~optional (~seq #:name name:id))
                      (~var p (Pattern-cls L #f))
                      (~var e (Expression-cls L #f))
                      (~var bus (Binding-updates-cls L))])
+           #:fail-unless (if arrow? (attribute arrow) #t)
+           "Expected rule form to start with #:-->"
+           #:fail-when (if arrow? #f (attribute arrow))
+           "Unexpected #:--> in [pat rhs] form"
+           
            #:attr rule (Rule #'sy (and (attribute name) (syntax-e #'name))
                              (attribute p.pat)
                              (attribute e.e)
@@ -639,7 +654,6 @@ Turn all free non-metavariables into external space names if they are bound.
 ;; Check that all occurrences of #:externalize are not in a union.
 (define (check-externalized stx)
   (for ([ty (in-hash-values (Language-user-spaces (current-language)))])
-    (displayln ty)
     (define sy (any-union-contains-externalized? ty))
     (when sy
       (raise-syntax-error sy (format "Cannot have externalized type in a union: ~a" ty) stx))))
@@ -651,7 +665,6 @@ Turn all free non-metavariables into external space names if they are bound.
     [(ops:Lang-options-cls . rest)
      (syntax-parse #'rest
        [gather:Language-externals/user-ids
-        (printf "Unames ~a~%Enames ~a~%" (attribute gather.unames) (attribute gather.enames))
         (syntax-parse #'rest
           [((~or (~var usr (User-cls (attribute ops.options)
                                      (sset-map syntax-e (attribute gather.unames))
@@ -688,9 +701,9 @@ Turn all free non-metavariables into external space names if they are bound.
             (attribute gather.meta-table)
             (attribute gather.uspace-info))])])]))
 
-(define (parse-reduction-relation stx L)
+(define (parse-reduction-relation stx)
   (syntax-parse stx
-    [((~var r (Rule-cls #t L)) ...) (attribute r.rule)]))
+    [((~var r (Rule-cls #t (current-language))) ...) (attribute r.rule)]))
 
 (define (parse-metafunction stx L)
   (syntax-parse stx
