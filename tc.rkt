@@ -114,7 +114,6 @@
      (values Γ* (Where sy pat* e*))]))
 
 (define (type-overlap? τ τ-or-τs)
-  (unless (Type? τ) (error 'type-overlap? "What? ~a" τ))
   (match τ-or-τs
     ['() #f]
     [(cons σ σs) (and (type-overlap? τ σ) (type-overlap? τ σs))]
@@ -143,7 +142,8 @@
       [(PAnd sy _ ps)
        (let tcp* ([Γ Γ] [ps ps] [rev-ps* '()] [expect expect-overlap])
          (match ps
-           ['() (values Γ (PAnd sy (chk expect) (reverse rev-ps*)))]
+           ['()
+            (values Γ (PAnd sy (chk expect) (reverse rev-ps*)))]
            [(cons p ps)
             (define-values (Γ* p*) (tc Γ p expect))
             (define τ (πcc p*))
@@ -152,7 +152,6 @@
       [(PName sy _ x)
        (match (hash-ref Γ x #f)
          [#f (define t (or (πct ct) expect-overlap T⊤))
-             (printf "Name ~a ty ~a (~a ~a)~%" x t expect-overlap ct)
              (values (hash-set Γ x t) (PName sy (chk t) x))]
          [τ (values
              Γ
@@ -172,8 +171,6 @@
        ;; If we just have a single variant we expect, do a better job localizing errors.
        (define res (resolve expect-overlap))
        (define met (type-meet res (generic-variant n len)))
-       (printf "Expectation: ~a, met with generic variant: ~a~%" res met)
-       ;; TODO: find possible variants in the language to get better annotations.
        (define-values (expects bound? tr-c)
          (match met
            [(TVariant: _ n* τs bound? tr-c)
@@ -237,6 +234,7 @@
        (values Γ (replace-ct (chk T⊤) pat))]
       [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
   (tc Γ pat expect-overlap))
+(trace tc-pattern)
 
 (define (tc-bus Γ Ξ bus)
   (let all ([Γ Γ] [bus bus] [rev-bus* '()])
@@ -262,6 +260,7 @@
   (define-values (Γ** bus*) (tc-bus Γ* Ξ bus))
   (define rhs* ((tc-expr Γ** Ξ) rhs expected))
   (Rule sy name lhs* rhs* bus*))
+(trace tc-rule)
 
 (define (tc-rules Γ Ξ rules expect-discr expected)
   (for/list ([rule (in-list rules)])
@@ -428,6 +427,7 @@
       [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]
       [(EMap-remove sy _ m k) (error 'tc-expr "Todo: map-remove")]
       [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
+  (trace tc-expr*)
   (tc-expr* e expected))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -522,6 +522,7 @@
 
 (define (report-all-errors v)
   (set! error-list null)
+  (displayln "Wat")
   (let populate ([v v])
     (cond [(Rule? v) (report-rule-errors v)]
           [(Expression? v) (report-expression-errors v)]

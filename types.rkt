@@ -327,30 +327,43 @@
     [_ ∅eq]))
 
 (define (mono-type? t)
-  (let coind ([A ∅eq] [t t])
-   (define m (Type-mono? t))
-   (cond
-    [(eq? m 'unset)
-     (define b
-       (match t
-         [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _ _)
-              (app (match-lambda [(or (TMap: _ d r _) (TCut: _ d r)) (list d r)] [_ #f]) ts))
-          (andmap ((curry coind) A) ts)]
-         [(or (Tμ: _ _ (Scope t) _ _ _)  (TSet: _ t _))
-          (coind A t)]
-         [(? TΛ?) #f]
-         [(TName: _ x _)
-          (or (set-member? A x) ;; already looked up name and haven't failed yet.
-              (coind (set-add A x)
-                     (hash-ref (Language-user-spaces (current-language)) x)))]
-         [_ #t]))
-     (set-Type-mono?! t b)
-     b]
-    [else m])))
+  (define m (Type-mono? t))
+  (cond
+   [(eq? m 'unset)
+    (define b
+      (let coind ([A ∅eq] [t t])
+        (define m (Type-mono? t))
+        (cond
+         [(eq? m 'unset)
+          (match t
+            [(or (TSUnion: _ ts) (TRUnion: _ ts))
+             (andmap ((curry coind) A) ts)]
+            [(or (TMap: _ d r _) (TCut: _ d r))
+             (and (coind A d) (coind A r))]
+            [(TVariant: _ _ ts _ _)
+             (let all ([A A] [ts ts])
+               (match ts
+                 ['() A]
+                 [(cons t ts)
+                  (define A* (coind A t))
+                  (and A* (all A* ts))]))]
+            [(or (Tμ: _ _ (Scope t) _ _ _)  (TSet: _ t _))
+             (coind A t)]
+            [(? TΛ?) #f]
+            [(TName: _ x _)
+             (if (set-member? A x) ;; already looked up name and haven't failed yet.
+                 A
+                 (coind (set-add A x)
+                        (hash-ref (Language-user-spaces (current-language)) x)))]
+            [_ A])]
+         [else (and m A)])))
+    (set-Type-mono?! t b)
+    b]
+   [else m]))
 
 (define (type-contains? ty inner)
   (let search ([ty ty])
-    (or (equal? ty inner)
+    (or (eq? ty inner)
         (match ty
           [(or (TΛ: _ _ (Scope t)) (Tμ: _ _ (Scope t) _ _ _)) (search t)]
           ;; boilerplate
@@ -540,9 +553,13 @@
             τσ]
         [y (⊔ (mk-TName y taddr) σ ρ)]))
     (define (unify τ σ)
-      (define out (⊔ (TUnif-τ τ) σ ρ))
-      (set-TUnif-τ! τ out)
-      τ)
+      (cond
+       [(type-contains? σ τ)
+        (TError (list "Cyclic unification"))]
+       [else
+        (define out (⊔ (TUnif-τ τ) σ ρ))
+        (set-TUnif-τ! τ out)
+        τ]))
     (cond
      [(and (TError? τ) (TError? σ))
       (TError (append (TError-msgs τ) (TError-msgs σ)))]
@@ -603,6 +620,7 @@
         [((? TCut?) _) (⊔ (resolve τ ρ) σ ρ)]
         [(_ (? TCut?)) (⊔ τ (resolve σ ρ) ρ)]
         [(_ _) (*TRUnion #f (list τ σ))])]))
+  (trace ⊔)
   (freeze (⊔ τ σ #hasheq())))
 
 
@@ -689,6 +707,7 @@
        [((? TCut?) _) (⊓ (resolve τ ρ) σ ρ)]
        [(_ (? TCut?)) (⊓ τ (resolve σ ρ) ρ)]
        [(_ _) T⊥])]))
+  (trace ⊓)
   (freeze (⊓ τ σ #hasheq())))
 
 ;; τ is castable to σ if τ <: σ, τ = ⊤,

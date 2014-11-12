@@ -291,7 +291,7 @@ single address space
                                ;; FIXME: actually check that ct and the given taddr are the same
                                ;; since a mismatch is an error.
                                (or ct
-                                   (Check
+                                   (Cast
                                     (mk-TAddr #'modes (syntax-e #'name)
                                               (attribute modes.mm)
                                               (attribute modes.em)
@@ -300,7 +300,7 @@ single address space
            #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
            #:attr pat (PIsExternal #'sy
                                    (or ct ;; FIXME: same as above
-                                       (Check
+                                       (Cast
                                         (mk-TExternal #'name (syntax-e #'name))))))
   (pattern (~and sy (n:id p ...))
            #:attr pat (PVariant #'sy ct (syntax-e #'n) (attribute p.pat)))
@@ -309,7 +309,7 @@ single address space
   (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L))))
            #:when (mono-type? (attribute t.t))
            #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
-                                        (Check (attribute t.t)))))
+                                        (Cast (attribute t.t)))))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))

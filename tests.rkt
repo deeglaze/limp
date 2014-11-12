@@ -46,14 +46,19 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) #f #f))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
+(type-print-verbosity 2)
+(pattern-print-verbosity 2)
+(expr-print-verbosity 2)
+
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
                                          (list (mk-TVariant #f 'blah (list) #f #f)
                                                foo-a-list-a))
-                               'a)))
+                               'a
+                               limp-default-Λ-addr)))
  (check-equal? (parse-type #`(#:Λ a (#:∪ (blah) #,foo-a-list-a)))
-               list-a
-               "Unquoting")
+        list-a
+        "Unquoting")
 
  (check-equal? (type-join foo-tt
                           (parse-type #'(#:Λ (x y) (foo x y))))
@@ -75,10 +80,6 @@
  (check-true
   (T⊤? (*TRUnion #f (list T⊤ foo-tt)))
   "Simplify union with ⊤")
-
-(type-print-verbosity 2)
-(pattern-print-verbosity 2)
-(expr-print-verbosity 2)
 
  ;; Fails because simplification doesn't heed language
  (parameterize ([current-language
@@ -118,7 +119,7 @@
                                  [#:--> (ev (lam y e) ρ κ)
                                         (co κ (Clo y e ρ))]
                                  [#:--> #:name var-lookup
-                                        (ev (#:cast Name x) ρ κ)
+                                        (ev (#:and (#:has-type Name) x) ρ κ)
                                         (co κ (#:map-lookup ρ x))]
 
                                  [#:--> (co (Cons (ar e ρ) κ) v)
@@ -142,5 +143,4 @@
 
   (report-all-errors R**)
 
-  (language->mkV R** void)
-  ))
+  (language->mkV R** void)))

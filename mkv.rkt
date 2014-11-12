@@ -184,6 +184,7 @@ without an intervening variant constructor.
   ;; Rewrite language user spaces to addrize the recursive references
   ;; Assign allocation behavior to each variant in Γ
     (define ty-to-mkv (make-hash))
+    (printf "Sup~%")
     (define translate (map-variants-to-rewritten-type ty-to-mkv space-recursion us))
     (for ([(name ty) (in-hash us)])
       (translate ty))

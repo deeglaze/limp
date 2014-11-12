@@ -54,10 +54,10 @@ and semantics.
         [(PSet-with* _ _ v p) `(#:set-with* ,(rec v)
                                             ,(rec p))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
-        [(PIsExternal _ (Check (TExternal: _ name))) `(#:is-external ,name)]
-        [(PIsAddr _ (Check (TAddr: _ space mm em _))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
-        [(PIsType _ (Check τ)) `(#:is-type ,τ)] ;; printer will handle τ
-        [_ `(error$ ,(format "Unsupported pattern: ~a" p))]))
+        [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
+        [(PIsAddr _ (Cast (TAddr: _ space mm em _))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
+        [(PIsType _ (Cast τ)) `(#:is-type FUCK)] ;; printer will handle τ
+        [_ `(error$ ,(format "Unsupported pattern: ~a" (struct->vector p)))]))
     (case v
       [(0) sexp]
       [(1) (ann-wrap (Typed-ct p) sexp)]
