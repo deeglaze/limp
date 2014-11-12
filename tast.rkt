@@ -8,12 +8,12 @@ and semantics.
 (provide (all-defined-out))
 
 (struct with-stx (stx) #:transparent)
-;; Cast or Check annotations?
-(struct Cast (t) #:transparent)
-(struct Check (t) #:transparent)
 (struct Typed with-stx (ct) #:transparent)
+(define πct (match-lambda
+             [(or (Cast t) (Check t)) t]
+             [_ #f]))
 (define πcc (match-lambda
-             [(Typed _ (or (Cast t) (Check t))) t]
+             [(Typed _ ct) (πct ct)]
              [_ #f]))
 
 (define (replace-ct ct v)

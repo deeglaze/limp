@@ -47,7 +47,7 @@ without an intervening variant constructor.
 |#
 
 ;; Find all the variants and associate with those types the set of newly allocated positions.
-(define (map-variants-to-rewritten-type h space-recursion Γ ty)
+(define ((map-variants-to-rewritten-type h space-recursion Γ) ty)
   (define (build t)
     (or (hash-ref h t #f)
         (let
@@ -96,8 +96,7 @@ without an intervening variant constructor.
 
 (define (implicit-translation? tr typed)
   (define σ (πcc typed))
-  (define τ (hash-ref tr σ
-                      (λ () (error 'populate-expr-rules "Untranslated type ~a (from ~a)" σ typed))))
+  (define τ (tr σ))
   (and (TAddr? τ) (TAddr-implicit? τ)))
 
 (define (populate-expr-rules tr vh eh path e)
@@ -185,14 +184,15 @@ without an intervening variant constructor.
   ;; Rewrite language user spaces to addrize the recursive references
   ;; Assign allocation behavior to each variant in Γ
     (define ty-to-mkv (make-hash))
+    (define translate (map-variants-to-rewritten-type ty-to-mkv space-recursion us))
     (for ([(name ty) (in-hash us)])
-      (map-variants-to-rewritten-type ty-to-mkv space-recursion us ty))
+      (translate ty))
 
     (define vtag->rule (make-hash))
     (define etag->rule (make-hash))
     (for ([rule (in-list R)]
           [i (in-naturals)])
-      (populate-rule-rules ty-to-mkv vtag->rule etag->rule
+      (populate-rule-rules translate vtag->rule etag->rule
                            (or (Rule-name rule) `(rule . ,i))
                            rule))
 

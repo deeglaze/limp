@@ -1,5 +1,6 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/syntax racket/base)
+         (only-in racket/bool implies)
          racket/list racket/match racket/set
          racket/string racket/trace
          "common.rkt" "language.rkt" "tast.rkt" "types.rkt")
@@ -14,12 +15,6 @@
   (raise-syntax-error sy "~a: Unbound metafunction name ~a" who f))
 (define ((unbound-pat-var sy who x))
   (raise-syntax-error sy "~a: Unbound pattern variable: ~a" who x))
-
-(define type-error-fn (make-parameter
-                       (λ (fmt . args)
-                          (Check (TError (list (apply format fmt args)))))))
-(define-syntax-rule (type-error f e ...)
-  ((type-error-fn) f e ...))
 
 (define (num-top-level-Λs τ)
   (let count ([τ τ] [i 0])
@@ -42,44 +37,44 @@
 (define (coerce-check-expect ct expect τ)
   (match ct
     [(Cast σ)
-     (define σ* (cast-to τ σ))
+     (define ct* (cast-to τ σ))
      (cond
-      [(if expect (<:? σ* expect) #t)
-       (Cast (or expect σ*))]
-      [else (type-error "Expected ~a, got ~a" expect τ)])]
+      [(implies expect (<:? (πct ct*) expect))
+       ct*]
+      [else (type-error "(A) Expected ~a, got ~a" expect τ)])]
     [(Check σ)
      (cond
       [(<:? τ σ)
        (cond
-        [(if expect (<:? τ expect) #t)
-         (Check (or expect σ))]
+        [(implies expect (<:? τ expect))
+         (Check τ)]
         [else
-         (type-error "Expected ~a, got ~a" expect τ)])]
+         (type-error "(B) Expected ~a, got ~a" expect τ)])]
       [else (type-error "Expect ~a to be a subtype of ~a" τ σ)])]
     [_
      (cond
-      [(if expect (<:? τ expect) #t) (Check (or expect τ))]
-      [else (type-error "Expected ~a, got ~a" expect τ)])]))
+      [(implies expect (<:? τ expect)) (Check τ)]
+      [else (type-error "(C ~a) Expected ~a, got ~a" ct expect τ)])]))
 
 (define (coerce-check-overlap ct expect-overlap τ)
-  (define (chk σ*)
-    (if
-     (if expect-overlap (type-overlap? σ* expect-overlap) #t)
-     #f
-     (type-error "Expected ~a to overlap with ~a" expect-overlap τ)))
+  (define (chk ct)
+    (unless (or (Cast? ct) (Check? ct)) (error 'chk "Fak ~a" ct))
+    (if (implies expect-overlap (type-overlap? (πct ct) expect-overlap))
+        #f
+        (type-error "Expected ~a to overlap with ~a" expect-overlap τ)))
   (match ct
     [(Cast σ)
-     (define σ* (cast-to τ σ))
-     (or (chk σ*)
-         (Cast (or expect-overlap σ*)))]
+     (define ct (cast-to τ σ))
+     (or (chk ct) ct)]
     [(Check σ)
      (cond
       [(<:? τ σ)
-       (or (chk τ) (Check σ))]
+       (define ct (Check σ))
+       (or (chk ct) ct)]
       [else
        (type-error "Overlap check: Expect ~a to be a subtype of ~a" τ σ)])]
-    [_ (or (chk τ)
-           (Check τ))]))
+    [_ (define ct (Check τ))
+       (or (chk ct) ct)]))
 
 ;; Repeatedly instantiate σ's Λs with τs until τs is empty.
 ;; If τs not empty before σ is not a Λ, then invoke on-too-many.
@@ -156,7 +151,8 @@
         
       [(PName sy _ x)
        (match (hash-ref Γ x #f)
-         [#f (define t (or expect-overlap T⊤))
+         [#f (define t (or (πct ct) expect-overlap T⊤))
+             (printf "Name ~a ty ~a (~a ~a)~%" x t expect-overlap ct)
              (values (hash-set Γ x t) (PName sy (chk t) x))]
          [τ (values
              Γ
@@ -174,13 +170,19 @@
       [(PVariant sy _ n ps)
        (define len (length ps))
        ;; If we just have a single variant we expect, do a better job localizing errors.
+       (define res (resolve expect-overlap))
+       (define met (type-meet res (generic-variant n len)))
+       (printf "Expectation: ~a, met with generic variant: ~a~%" res met)
+       ;; TODO: find possible variants in the language to get better annotations.
        (define-values (expects bound? tr-c)
-         (match (type-meet (resolve expect-overlap) (generic-variant n len))
+         (match met
            [(TVariant: _ n* τs bound? tr-c)
             ;; Name and length match due to type-meet
             (values τs bound? tr-c)]
            ;; XXX: is this the right behavior?
-           [_ (values (list (type-error "Given variant ~a with arity ~a, expected overlap with ~a"
+           [_ (values (make-list
+                       len
+                       (type-error "Given variant ~a with arity ~a, expected overlap with ~a"
                                    n len expect-overlap))
                       'dc 'dc)]))
 
@@ -199,7 +201,7 @@
            (and (PMap-with* sy _ k v p) (app (λ _ PMap-with*) ctor)))
        ;; Another localizing check
        (define-values (ext exk exv)
-         (match (type-meet expect-overlap (mk-TMap #f T⊤ T⊤ 'dc))
+         (match (resolve (type-meet expect-overlap generic-map))
            [(TMap: _ d r ext) (values ext d r)]
            ;; XXX: if not a map, then what?
            [_ (values limp-externalize-default T⊤ T⊤)]))
@@ -208,20 +210,25 @@
        (define-values (Γ*** p*) (tc Γ** p expect-overlap))
        (values Γ***
                (ctor sy
-                     (chk (type-join (mk-TMap (πcc k*) (πcc v*) ext) (πcc p*)))
+                     (chk (type-join
+                           (mk-TMap #f (πcc k*) (πcc v*) ext)
+                           (πcc p*)))
                      k* v* p*))]
         
       [(or (and (PSet-with sy _ v p) (app (λ _ PSet-with) ctor))
            (and (PSet-with* sy _ v p) (app (λ _ PSet-with*) ctor)))
        ;; Another localizing check
        (define-values (ext exv)
-         (match (type-meet expect-overlap (mk-TSet #f T⊤ 'dc))
+         (match (resolve (type-meet expect-overlap generic-set))
            [(TSet: _ v ext) (values ext v)]
            [_ (values limp-externalize-default T⊤)]))
        (define-values (Γ* v*) (tc Γ v exv))
        (define-values (Γ** p*) (tc Γ* p expect-overlap))
        (values Γ**
-               (ctor sy (chk (type-join (mk-TSet (πcc v*) ext) (πcc p*))) v* p*))]
+               (ctor sy (chk (type-join
+                              (mk-TSet #f (πcc v*) ext)
+                              (πcc p*)))
+                     v* p*))]
 
       [(PTerm sy _ t)
        (define t* (tc-term Γ Ξ t expect-overlap))
@@ -230,7 +237,6 @@
        (values Γ (replace-ct (chk T⊤) pat))]
       [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
   (tc Γ pat expect-overlap))
-
 
 (define (tc-bus Γ Ξ bus)
   (let all ([Γ Γ] [bus bus] [rev-bus* '()])
@@ -308,42 +314,45 @@
       [(EVariant sy _ n tag τs es)
        ;; Find all the n-named variants and find which makes sense.
        (define arity (length es))
-       (define possible-σs (lang-variants-of-arity (generic-variant n arity)))
-       ;; FIXME: ad-hoc polymorphism should not collapse, but introduce multiple
-       ;; possible typings, so consumers might reject one typing but accept another.
-       (define-values (τout ess*)
-         (for/fold ([τ T⊥] [ess* '()])
-             ([σ (in-list possible-σs)])
-           (define vσ (let/ec break (repeat-inst σ τs (λ () (break #f)))))
-           (match vσ
-             [(TVariant: _ _ σs _ _) ;; We know |σs| = |es| by possible-σs def.
-              ;; expressions typecheck with a possible variant type?
-              (define es*-op
-                (let/ec break
-                  (parameterize ([type-error-fn (λ _ (break #f))])
-                    (for/list ([σ (in-list σs)]
-                               [e (in-list es)])
-                      (tc-expr* e σ)))))
-              (if es*-op
-                  ;; good, then it could be vσ too.
-                  (values (type-join τ vσ) (cons es*-op ess*))
-                  ;; well then it's not vσ.
-                  (values τ ess*))]
-             [_ (values τ ess*)])))
-       ;; Each expression gets the joined type of its position.
-       (define e-τs (make-vector arity T⊥))
-       (for ([es (in-list ess*)])
-         (for ([e (in-list es)]
-               [i (in-naturals)])
-           (vector-set! e-τs (type-join (vector-ref e-τs i) (πcc e)))))
-       (define es*
-         (for/list ([e (in-list es)]
-                    [i (in-naturals)])
-           (tc-expr* e (vector-ref e-τs i))))
-       (EVariant sy (if (pair? ess*)
-                        (chk τout)
-                        (type-error "No variant type matched"))
-                 n tag τs es*)]
+       (define generic (generic-variant n arity))
+       ;; If we expect a type, we have a cast or explicit check, then use those rather than
+       ;; an inferred variant type.
+       (define (do σs tr tc)
+         ;; expressions typecheck with a possible variant type?
+         (define es*
+           (for/list ([σ (in-list σs)]
+                      [e (in-list es)])
+             (tc-expr* e σ)))
+         (EVariant sy
+                   (Check (mk-TVariant #f n (map πcc es*) tr tc))
+                   n tag τs es*))
+       (define (infer)
+         (define possible-σs (lang-variants-of-arity generic))
+         (define found
+           (for*/first ([σ (in-list possible-σs)]
+                        [es*-op
+                         (in-value
+                          (let/ec break
+                            (match (repeat-inst σ τs (λ () (break #f)))
+                              [(TVariant: _ _ σs tr tc) ;; We know |σs| = |es| by possible-σs def.
+                               (parameterize ([type-error-fn (λ _ (break #f))])
+                                 (do σs tr tc))]
+                              [_ #f])))]
+                        #:when es*-op)
+             es*-op))
+         (or found
+             (EVariant sy (type-error "No variant type matched")
+                       n tag τs (for/list ([e (in-list es)]) (tc-expr* e T⊤)))))
+       (if expected
+           (match (resolve (type-meet expected generic))
+             [(TVariant: _ _ σs tr tc) (do σs tr tc)]
+             [_ 'bad])
+           (match ct
+             [(Check τ)
+              (match (resolve (type-meet τ generic))
+                [(TVariant: _ _ σs tr tc) (do σs tr tc)]
+                [_ (infer)])]
+             [_ (infer)]))]
 
       [(ERef sy _ x)
        (ERef sy (chk (hash-ref Γ x (unbound-pat-var sy 'tc-expr x))) x)]
@@ -373,11 +382,16 @@
        (EMatch sy (chk τjoin) d* rules*)]
 
       [(EExtend sy _ m tag k v)
-       (define m* (tc-expr* m #f))
-       (define k* (tc-expr* k #f))
-       (define v* (tc-expr* v #f))
+       (define-values (d r ext)
+         (match (resolve (type-meet expected generic-map))
+           [(TMap: _ d r ext) (values d r ext)]
+           [_ (values #f #f 'dc)]))
+       (define m* (tc-expr* m expected))
+       (define k* (tc-expr* k d))
+       (define v* (tc-expr* v r))
+       ;; Can't use 'dc when we expect #t/#f since 'dc is higher in the lattice.
        (EExtend sy 
-                (chk (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) 'dc)))
+                (chk (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) ext)))
                 m* tag k* v*)]
 
       [(EEmpty-Map sy _) (EEmpty-Map sy (project-check TMap? "empty-map" "map"))]
@@ -406,9 +420,9 @@
       [(ESet-member sy _ e v) (error 'tc-expr "Todo: set-member?")]
       [(EMap-lookup sy _ m k)
        (define m* (tc-expr* m generic-map))
-       (match (type-meet (πcc m*) generic-map)
+       (match (resolve (type-meet (πcc m*) generic-map))
          [(TMap: _ d r _)
-          (EMap-lookup (chk r) m* (tc-expr* k d))]
+          (EMap-lookup sy (chk r) m* (tc-expr* k d))]
          [τ (EMap-lookup sy (type-error "Expected a map type: ~a" τ)
                          m* (tc-expr* k T⊤))])]
       [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]

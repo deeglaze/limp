@@ -674,13 +674,14 @@ Turn all free non-metavariables into external space names if they are bound.
                                      (attribute gather.meta-table)
                                      (attribute gather.uspace-info)))
                  :External-shape) ...)
-           (define pre-Γ (make-hasheq))
-           (for ([space (in-list (attribute usr.name))]
-                 [ty (in-list (attribute usr.ty))])
-             (hash-set! pre-Γ (syntax-e space) ty))
+           (define pre-Γ
+             (for/list ([space (in-list (attribute usr.name))]
+                        [ty (in-list (attribute usr.ty))])
+             (cons (syntax-e space) ty)))
            (parameterize ([current-language (Language #f
                                                       (attribute gather.external-spaces)
                                                       #f
+                                                      (make-hasheq pre-Γ)
                                                       pre-Γ
                                                       #f
                                                       #f)])
@@ -699,6 +700,7 @@ Turn all free non-metavariables into external space names if they are bound.
             (attribute ops.options)
             (attribute gather.external-spaces)
             ∅ ;; TODO: syntax for E<:
+            (make-hasheq categorized-and-guarded)
             categorized-and-guarded
             (attribute gather.meta-table)
             (attribute gather.uspace-info))])])]))

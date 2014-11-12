@@ -1,6 +1,10 @@
 #lang racket/base
-(require rackunit racket/set syntax/parse racket/sandbox
+(require racket/match
          racket/pretty
+         racket/sandbox
+         racket/set
+         rackunit
+         syntax/parse
          "common.rkt"
          "language.rkt"
          "mkv.rkt"
@@ -10,9 +14,14 @@
          "types.rkt")
 
 (with-limits 10 1024
- (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()])
+ (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()] #:use-lang? [use-lang? #f])
+   (define-values (unames* enames* meta-table*)
+     (if use-lang?
+         (match-let ([(Language _ ES _ US _ MT _) (current-language)])
+           (values (hash-key-set US) (hash-key-set ES) MT))
+         (values unames enames meta-table)))
    (syntax-parse stx
-     [(~var t (TopPreType unames enames meta-table)) (attribute t.t)]))
+     [(~var t (TopPreType unames* enames* meta-table*)) (attribute t.t)]))
  (define (parse-expr stx)
    (syntax-parse stx
      [(~var e (Expression-cls (current-language) #f)) (attribute e.e)]))
@@ -52,14 +61,13 @@
 
  (define us-test
    ;; List = Λ a (U (blah) (foo a (List a))
-   (make-hash
-    (list
+   (list
      (cons 'List list-a)
      ;; Blah = (U ⊤ (foo ⊤ ⊤))
      ;; This foo will (should) be forgotten
      (cons 'Blor (*TRUnion #f (list T⊤ foo-tt)))
      ;; Cord = Λ x Λ y (U (bar ⊤) (foo x y))
-     (cons 'Cord (quantify-frees (parse-type #`(#:∪ (bar #:⊤) #,foo-x-y)) '(y x))))))
+     (cons 'Cord (quantify-frees (parse-type #`(#:∪ (bar #:⊤) #,foo-x-y)) '(y x)))))
 
  (check-equal? (type-meet foo-tt foo-x-y) foo-x-y)
  (check-equal? (type-join foo-tt foo-x-y) foo-tt)
@@ -74,7 +82,7 @@
 
  ;; Fails because simplification doesn't heed language
  (parameterize ([current-language
-                 (Language #hash() #hash() ∅ us-test #hash() (make-hash))])
+                 (Language #hash() #hash() ∅ (make-hash us-test) us-test  #hash() (make-hash))])
    (check-equal?
     (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) 'dc 'dc)))
     (set (quantify-frees foo-x-y '(y x))
@@ -107,22 +115,20 @@
   (define R
     (parse-reduction-relation #'([#:--> (ev (app e0 e1) ρ κ)
                                         (ev e0 ρ (Cons (ar e1 ρ) κ))]
-                                 [#:--> (ev (lam x e) ρ κ)
-                                        (co κ (Clo x e ρ))]
+                                 [#:--> (ev (lam y e) ρ κ)
+                                        (co κ (Clo y e ρ))]
                                  [#:--> #:name var-lookup
                                         (ev (#:cast Name x) ρ κ)
-                                        (co κ (#:lookup (#:map-lookup ρ x)))]
+                                        (co κ (#:map-lookup ρ x))]
 
                                  [#:--> (co (Cons (ar e ρ) κ) v)
                                         (ev e ρ (Cons (fn v) κ))]
-                                 [#:--> (co (Cons (fn (Clo x e ρ)) κ) v)
-                                        (ap x e ρ v κ)]
+                                 [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
+                                        (ap z e ρ v κ)]
 
-                                 [#:--> (ap x e ρ v κ)
-                                        (ev e (#:extend ρ x a) κ)
-                                        [#:where a (#:alloc)]
-                                        [#:update a v]])))
-    (check-true
+                                 [#:--> (ap w e ρ v κ)
+                                        (ev e (#:extend ρ w v) κ)])))
+  (check-true
    (hash-ref (recursive-nonrecursive
               (Language-user-spaces
                (current-language)))
@@ -130,10 +136,11 @@
              #f)
    "List is recursive")
 
-  (define R* (tc-rules #hash() #hash() R T⊤ T⊤))
-  (pretty-print R*)
+  (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
+  (define R** (tc-rules #hash() #hash() R Sτ Sτ))
+  (pretty-print R**)
 
-  (report-all-errors R*)
+  (report-all-errors R**)
 
-  (language->mkV R* void)
+  (language->mkV R** void)
   ))

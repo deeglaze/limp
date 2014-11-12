@@ -5,6 +5,16 @@
          "common.rkt" "language.rkt")
 (provide (all-defined-out))
 
+;; Cast or Check annotations?
+(struct Cast (t) #:transparent)
+(struct Check (t) #:transparent)
+
+(define type-error-fn (make-parameter
+                       (λ (fmt . args)
+                          (Check (TError (list (apply format fmt args)))))))
+(define-syntax-rule (type-error f e ...)
+  ((type-error-fn) f e ...))
+
 (struct addrize ()) (define -addrize (addrize))
 
 (define type-print-verbosity (make-parameter 0))
@@ -36,11 +46,10 @@
            base)]
        [(? T⊥?) '⊥]
       [(or (and (TSUnion: _ ts) (app (λ _ '#:∪) head))
-           (and (TRUnion: _ ts) (app (λ _ '#:r∪) head))
-           (app (match-lambda [(TMap: _ d r _) (list '↦ d r)]
-                              [(TSet: _ s _) (list '℘ s)]
-                              [_ #f]) (cons head ts)))
+           (and (TRUnion: _ ts) (app (λ _ '#:r∪) head)))
        `(,head . ,(map rec ts))]
+      [(TMap: _ d r ext) `(↦ ,(rec d) ,(rec r) ,ext)]
+      [(TSet: _ s ext) `(℘ ,(rec s) ,ext)]
       [(TCut: _ s u)
        `(#:inst ,(rec s) ,(rec u))]
       [(? T⊤?) '⊤]
@@ -151,6 +160,7 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [(TUnif τ) (open τ i)]
       [_ (error 'open "Bad type ~a" t*)])))
 
 ;; predictable name generation over gensym.
@@ -191,6 +201,7 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [(TUnif τ) (open* τ)]
       [_ (error 'open "Bad type ~a" t*)])))
 
 (define (subst-name t name s)
@@ -425,7 +436,10 @@
              (match (hash-ref rec-spaces x #f)
                [#f
                 (match (hash-ref Γ x #f)
-                  [#f (mk-TName sy (hash-ref extra-Γ x) taddr)]
+                  [#f
+                   (unless extra-Γ
+                     (error 'resolve "Missing extra context for ~a" x))
+                   (mk-TName sy (hash-ref extra-Γ x) taddr)]
                   [τ (fuel τ (sub1 i))])]
                [#t (or taddr limp-default-Λ-addr)])]
             [(Tμ: sy x st r c n)
@@ -450,10 +464,10 @@
 
 ;; The TAPL approach to equirecursive subtyping.
 ;; Uses language axioms for external subtyping.
-(define (<:? τ σ)
+(define (<:? τ σ [ρ #f])
   (define L (current-language))
-  ((<:?-aux (Language-E<: L)) ∅ τ σ))
-(define ((<:?-aux E<:) A τ σ)
+  ((<:?-aux (Language-E<: L) ρ) ∅ τ σ))
+(define ((<:?-aux E<: ρ) A τ σ)
   (define (<:?-aux A τ σ)
     (define (grow-A) (set-add A (cons τ σ)))
     (cond
@@ -474,34 +488,34 @@
              [((cons τ τs) (cons σ σs))
               (seq A (<:?-aux A τ σ) (each A τs σs))]
              [(_ _) #f]))]
-        [((TSet: _ τ ext) (TSet: _ σ ext)) (<:?-aux A τ σ)]
-        [((TMap: _ τk τv ext) (TMap: _ σk σv ext))
-         (seq A
-              (<:?-aux A τk σk)
-              (<:?-aux A σv σv))]
-        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
-         (let each ([A (grow-A)] [ts ts])
-           (match ts
-             ['() A]
-             [(cons t ts)
-              (seq A
-                   (<:?-aux A t σ)
-                   (each A ts))]
-             [_ (error 'each "Expected a list of types ~a" ts)]))]
-        [(_ (or (TRUnion: _ σs) (TSUnion: _ σs)))
-         (let some ([A (grow-A)] [σs σs])
-           (match σs
-             ['() #f]
-             [(cons σ σs)
-              (or (<:?-aux A τ σ)
-                  (some A σs))] ;; Do not save false path
-             [_ (error 'some "Expected a list of types ~a" σs)]))]
+        [((TSet: _ τ lext) (TSet: _ σ rext))
+         (and
+          (or (equal? lext rext)
+              (eq? rext 'dc))
+          (<:?-aux A τ σ))]
+        [((TMap: _ τk τv lext) (TMap: _ σk σv rext))
+         (and
+          (or (equal? lext rext)
+              (eq? rext 'dc))
+          (seq A
+               (<:?-aux A τk σk)
+               (<:?-aux A σv σv)))]
         [((TΛ: _ _ sτ) (TΛ: _ _ sσ))
          (define name (mk-TFree #f (gensym 'dummy) #f))
          (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
         [(_ (TExternal: _ name)) (and (set-member? E<: (cons τ name)) A)]
-        [((? needs-resolve?) _) (<:?-aux (grow-A) (resolve τ) σ)]
-        [(_ (? needs-resolve?)) (<:?-aux (grow-A) τ (resolve σ))]
+        [((? needs-resolve?) _)
+         (<:?-aux (grow-A) (resolve τ ρ) σ)]
+        [(_ (? needs-resolve?))
+         (<:?-aux (grow-A) τ (resolve σ ρ))]
+        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
+         (and (for/and ([t (in-list ts)])
+                (<:?-aux A t σ))
+              A)]
+        [(_ (or (TRUnion: _ σs) (TSUnion: _ σs)))
+         (and (for/or ([σ (in-list σs)])
+                (<:?-aux A τ σ))
+              A)]
         [(_ _) #f])]))
   (<:?-aux A τ σ))
 
@@ -519,8 +533,10 @@
     (define (join-named x taddr σ)
       (match (hash-ref ρ x #f)
         [#f (define x* (gensym x))
+            (hash-set! us x* T⊥)
             (define τσ (⊔ (hash-ref us x) σ (hash-set ρ x x*)))
             (hash-set! us x* τσ)
+            (printf "⊔: New named space ~a: ~a" x* τσ)
             τσ]
         [y (⊔ (mk-TName y taddr) σ ρ)]))
     (define (unify τ σ)
@@ -530,8 +546,8 @@
     (cond
      [(and (TError? τ) (TError? σ))
       (TError (append (TError-msgs τ) (TError-msgs σ)))]
-     [(<:? τ σ) σ]
-     [(<:? σ τ) τ]
+     [(<:? τ σ ρ) σ]
+     [(<:? σ τ ρ) τ]
      [else
       (match* (τ σ)
         [((TVariant: _ n τs tr0 tc0) (TVariant: _ n σs tr1 tc1))
@@ -589,6 +605,7 @@
         [(_ _) (*TRUnion #f (list τ σ))])]))
   (freeze (⊔ τ σ #hasheq())))
 
+
 (define (type-meet τ σ)
   ;; potentially creates several equal but differently named types.
   (define us (Language-user-spaces (current-language)))
@@ -596,10 +613,14 @@
     (define (meet-named x taddr σ)
       (match (hash-ref ρ x #f)
         [#f (define x* (gensym x))
+            (printf "New named space ~a from ~a~%" x* x)
+            (hash-set! us x* T⊥)
             (define τσ (⊓ (hash-ref us x) σ (hash-set ρ x x*)))
             (hash-set! us x* τσ)
             τσ]
-        [y (⊓ (mk-TName y taddr) σ ρ)]))
+        [y
+         (printf "⊓: Translated name: ~a~%" y)
+         (⊓ (mk-TName #f y taddr) σ ρ)]))
     (define (unify τ σ)
       (define out (⊓ (TUnif-τ τ) σ ρ))
       (set-TUnif-τ! τ out)
@@ -607,8 +628,8 @@
    (cond
     [(and (TError? τ) (TError? σ))
      (TError (append (TError-msgs τ) (TError-msgs σ)))]
-    [(<:? τ σ) τ]
-    [(<:? σ τ) σ]
+    [(<:? τ σ ρ) τ]
+    [(<:? σ τ ρ) σ]
     [else
      (match* (τ σ)
        [((TVariant: _ n τs tr0 tc0) (TVariant: _ n σs tr1 tc1))
@@ -676,8 +697,9 @@
   (define (check A from to)
     (if (or
          (<:? from to) ;; upcast
-         (T⊤? from))
+         (<:? to from)) ;; strict downcast
         A
+        ;; Structurally castable?
         (match* (from to)
           [((TΛ: _ _ (Scope f)) (TΛ: _ _ (Scope t)))
            (check A f t)]
@@ -718,51 +740,54 @@
   (and (check ∅ from to) #t))
 
 (define (cast-to from to)
-  (if (castable from to)
-      to
-      (error 'cast-to "Could not cast ~a to ~a" from to)))
+  (cond
+   [(<:? from to) (Check to)] ;; upcast -> check, not cast
+   [(castable from to) (Cast to)]
+   [else (type-error "Could not cast ~a to ~a" from to)]))
 
 ;; Find all instances of variants named n with given arity, and return
 ;; their type, additionally quantified by all the containing Λs.
 (define (lang-variants-of-arity upper-bound)
-  (define us (Language-user-spaces (current-language)))
+  (define us (Language-ordered-us (current-language)))
   (define seen (mutable-seteq))
-  (for/fold ([found '()])
-      ([τ (in-hash-values us)])
-    (define (collect τ TVs Name-TVs found)
-      (define (collect* τs found)
-        (match τs
-          ['() found]
-          [(cons τ τs)
-           (define found* (collect τ TVs Name-TVs found))
-           (collect* τs found*)]
-          [_ (error 'collect* "Expected a list of types: ~a" τs)]))
-      (cond
-       [(set-member? seen τ) found]
-       [else
-        (set-add! seen τ)
-        (match τ
-          [(TVariant: _ n* ts tr tc)
-           (define found*
-             (if (<:? τ upper-bound) ;; But what if we need to unify?
-                 (cons (quantify-frees τ TVs #:names Name-TVs) found)
-                 found))
-           (collect* ts found*)]
-          [(TΛ: _ x s)
-           (define x* (gensym x))
-           (define TVs* (cons x* TVs))
-           (collect (open-scope s (mk-TFree #f x* #f)) TVs* (cons x Name-TVs) found)]
-          [(TName: _ x _)
-           found]
-          [(Tμ: _ x s r c n)
-           (collect (open-scope s (mk-TFree #f (gensym x) #f)) TVs Name-TVs found)]
-          [(? TCut?) (collect (resolve τ) TVs Name-TVs found)]
-          [(TMap: _ d r _)
-           (collect r TVs Name-TVs (collect d TVs Name-TVs found))]
-          [(TSet: _ v _) (collect v TVs Name-TVs found)]
-          [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
-          [_ found])]))
-    (collect τ '() '() found)))
+  (reverse
+   (for/fold ([found '()])
+       ([nu (in-list us)])
+     (define τ (cdr nu))
+     (define (collect τ TVs Name-TVs found)
+       (define (collect* τs found)
+         (match τs
+           ['() found]
+           [(cons τ τs)
+            (define found* (collect τ TVs Name-TVs found))
+            (collect* τs found*)]
+           [_ (error 'collect* "Expected a list of types: ~a" τs)]))
+       (cond
+        [(set-member? seen τ) found]
+        [else
+         (set-add! seen τ)
+         (match τ
+           [(TVariant: _ n* ts tr tc)
+            (define found*
+              (if (<:? τ upper-bound) ;; But what if we need to unify?
+                  (cons (quantify-frees τ TVs #:names Name-TVs) found)
+                  found))
+            (collect* ts found*)]
+           [(TΛ: _ x s)
+            (define x* (gensym x))
+            (define TVs* (cons x* TVs))
+            (collect (open-scope s (mk-TFree #f x* #f)) TVs* (cons x Name-TVs) found)]
+           [(TName: _ x _)
+            found]
+           [(Tμ: _ x s r c n)
+            (collect (open-scope s (mk-TFree #f (gensym x) #f)) TVs Name-TVs found)]
+           [(? TCut?) (collect (resolve τ) TVs Name-TVs found)]
+           [(TMap: _ d r _)
+            (collect r TVs Name-TVs (collect d TVs Name-TVs found))]
+           [(TSet: _ v _) (collect v TVs Name-TVs found)]
+           [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
+           [_ found])]))
+     (reverse (collect τ '() '() found)))))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

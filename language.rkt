@@ -6,6 +6,7 @@
                   external-spaces ;; Map[Name,ED]
                   E<: ;; Set[(U Pair[Name,τ] Pair[τ, Name])]
                   user-spaces ;; Mutable-Map[Name,Type]
+                  ordered-us ;; List[Pair[Name,Type]]
                   meta-table ;; if #:check-metavariables is given, names include a space check.
                   uspace-info) ;; Mutable-Map[Name,Vector[Bool, Bool, ℕ]]
         #:transparent)
@@ -24,6 +25,7 @@
             #hasheq()
             ∅
             (make-hasheq)
+            #hasheq()
             #hash()
             (make-hasheq)))
 
