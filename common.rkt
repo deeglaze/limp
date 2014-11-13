@@ -22,10 +22,12 @@
              (syntax/loc syn
                (folder ([acc base]) guards
                        pre-body ...
-                       (f acc (let () post-body ...))))])))]))
+                       (f (let () post-body ...) acc)))])))]))
 
 (define-for/do for/union for/fold ∅ set-union)
 (define-for/do for/unioneq for/fold ∅eq set-union)
+
+(define-for/do for/append for/fold '() append)
 
 (define (hash-hash-add! h k k2 v)
   (hash-set! h k (hash-set! (hash-ref! h k make-hash) k2 v)))

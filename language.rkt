@@ -2,6 +2,14 @@
 (require "common.rkt")
 (provide (all-defined-out))
 
+;; A Trust-Tag is one of
+;; - 'untrusted 
+;; - 'bounded [only destructed]
+;; - 'trusted [allowed to be constructed without heap-allocation]
+(define (untrusted? x) (eq? x 'untrusted))
+
+(struct User-Space (τ bounded? trust-construction?) #:prefab)
+
 (struct Language (options ;; Map[symbol,any]
                   external-spaces ;; Map[Name,ED]
                   E<: ;; Set[(U Pair[Name,τ] Pair[τ, Name])]
@@ -9,10 +17,10 @@
                   ordered-us ;; List[Pair[Name,Type]]
                   meta-table ;; if #:check-metavariables is given, names include a space check.
                   uspace-info) ;; Mutable-Map[Name,Vector[Bool, Bool, ℕ]]
-        #:transparent)
+        #:prefab)
 
-(struct Reduction-relation (rules τ) #:transparent)
-(struct Metafunction (name τ rules) #:transparent)
+(struct Reduction-relation (rules τ) #:prefab)
+(struct Metafunction (name τ rules) #:prefab)
 
 ;; External descriptor
 (struct ED (⊔ ⊑ ≡ μ touch quality pretty parse))

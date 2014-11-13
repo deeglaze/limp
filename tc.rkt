@@ -29,7 +29,7 @@
      (abstract-free
       (mk-TΛ #f 'y
        (abstract-free
-        (mk-TVariant #f 'pair (list (mk-TFree #f 'x #f) (mk-TFree #f 'y #f)) #f #f)
+        (mk-TVariant #f 'pair (list (mk-TFree #f 'x #f) (mk-TFree #f 'y #f)) 'untrusted)
         'y))
       'x)))
   (check-equal? 2 (num-top-level-Λs ∀pair)))
@@ -124,11 +124,12 @@
                ;; ab = (U a<> b<>)
                ;; foo<ab> ⋈ (U foo<b> bar<⊤>)
                (mk-TVariant #f 'foo
-                            (list (*TRUnion #f (list (mk-TVariant #f 'a '() #f #f)
-                                                     (mk-TVariant #f 'b '() #f #f))))
-                            #f #f)
-               (*TRUnion #f (list (mk-TVariant #f 'foo (list (mk-TVariant #f 'b '() #f #f)) #f #f)
-                                  (mk-TVariant #f 'bar (list T⊤) #f #f))))))
+                            (list (*TRUnion #f (list (mk-TVariant #f 'a '() 'untrusted)
+                                                     (mk-TVariant #f 'b '() 'untrusted))))
+                            'untrusted)
+               (*TRUnion #f (list (mk-TVariant #f 'foo (list (mk-TVariant #f 'b '() 'untrusted))
+                                               'untrusted)
+                                  (mk-TVariant #f 'bar (list T⊤) 'untrusted))))))
 
 (define (tc-term Γ Ξ t expect-overlap)
   (error 'tc-term "todo"))
@@ -171,23 +172,23 @@
        ;; If we just have a single variant we expect, do a better job localizing errors.
        (define res (resolve expect-overlap))
        (define met (type-meet res (generic-variant n len)))
-       (define-values (expects bound? tr-c)
+       (define-values (expects tr)
          (match met
-           [(TVariant: _ n* τs bound? tr-c)
+           [(TVariant: _ n* τs tr)
             ;; Name and length match due to type-meet
-            (values τs bound? tr-c)]
+            (values τs tr)]
            ;; XXX: is this the right behavior?
            [_ (values (make-list
                        len
                        (type-error "Given variant ~a with arity ~a, expected overlap with ~a"
                                    n len expect-overlap))
-                      'dc 'dc)]))
+                      'dc)]))
 
        (let all ([Γ Γ] [ps ps] [exs expects] [τs-rev '()] [rev-ps* '()])
          (match* (ps exs)
            [('() '())
             (values Γ (PVariant sy
-                                (chk (*TVariant #f n (reverse τs-rev) bound? tr-c))
+                                (chk (*TVariant #f n (reverse τs-rev) tr))
                                 n
                                 (reverse rev-ps*)))]
            [((cons p ps) (cons ex exs))
@@ -234,7 +235,6 @@
        (values Γ (replace-ct (chk T⊤) pat))]
       [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
   (tc Γ pat expect-overlap))
-(trace tc-pattern)
 
 (define (tc-bus Γ Ξ bus)
   (let all ([Γ Γ] [bus bus] [rev-bus* '()])
@@ -260,7 +260,6 @@
   (define-values (Γ** bus*) (tc-bus Γ* Ξ bus))
   (define rhs* ((tc-expr Γ** Ξ) rhs expected))
   (Rule sy name lhs* rhs* bus*))
-(trace tc-rule)
 
 (define (tc-rules Γ Ξ rules expect-discr expected)
   (for/list ([rule (in-list rules)])
@@ -301,7 +300,7 @@
                    T⊤)]
           [else
            ;; INVARIANT: the metafunction type is a function and the domain is monovariant
-           (match-define (TArrow: _ (TVariant: _ _ σs _ _) rng) inst)
+           (match-define (TArrow: _ (TVariant: _ _ σs _) rng) inst)
            (values σs rng)]))
        ;; Check arguments against instantiated domain types.
        (define es*
@@ -316,14 +315,14 @@
        (define generic (generic-variant n arity))
        ;; If we expect a type, we have a cast or explicit check, then use those rather than
        ;; an inferred variant type.
-       (define (do σs tr tc)
+       (define (do σs tr)
          ;; expressions typecheck with a possible variant type?
          (define es*
            (for/list ([σ (in-list σs)]
                       [e (in-list es)])
              (tc-expr* e σ)))
          (EVariant sy
-                   (Check (mk-TVariant #f n (map πcc es*) tr tc))
+                   (Check (mk-TVariant #f n (map πcc es*) tr))
                    n tag τs es*))
        (define (infer)
          (define possible-σs (lang-variants-of-arity generic))
@@ -333,9 +332,9 @@
                          (in-value
                           (let/ec break
                             (match (repeat-inst σ τs (λ () (break #f)))
-                              [(TVariant: _ _ σs tr tc) ;; We know |σs| = |es| by possible-σs def.
+                              [(TVariant: _ _ σs tr) ;; We know |σs| = |es| by possible-σs def.
                                (parameterize ([type-error-fn (λ _ (break #f))])
-                                 (do σs tr tc))]
+                                 (do σs tr))]
                               [_ #f])))]
                         #:when es*-op)
              es*-op))
@@ -344,12 +343,12 @@
                        n tag τs (for/list ([e (in-list es)]) (tc-expr* e T⊤)))))
        (if expected
            (match (resolve (type-meet expected generic))
-             [(TVariant: _ _ σs tr tc) (do σs tr tc)]
+             [(TVariant: _ _ σs tr) (do σs tr)]
              [_ 'bad])
            (match ct
              [(Check τ)
               (match (resolve (type-meet τ generic))
-                [(TVariant: _ _ σs tr tc) (do σs tr tc)]
+                [(TVariant: _ _ σs tr) (do σs tr)]
                 [_ (infer)])]
              [_ (infer)]))]
 
@@ -427,7 +426,6 @@
       [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]
       [(EMap-remove sy _ m k) (error 'tc-expr "Todo: map-remove")]
       [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
-  (trace tc-expr*)
   (tc-expr* e expected))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -522,7 +520,6 @@
 
 (define (report-all-errors v)
   (set! error-list null)
-  (displayln "Wat")
   (let populate ([v v])
     (cond [(Rule? v) (report-rule-errors v)]
           [(Expression? v) (report-expression-errors v)]

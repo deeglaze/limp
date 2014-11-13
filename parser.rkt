@@ -1,13 +1,18 @@
 #lang racket/base
 (require (for-syntax racket/base syntax/parse racket/syntax)
-         syntax/parse racket/syntax racket/match racket/set racket/list
+         (only-in racket/bool implies)
+         racket/list
+         racket/match
+         racket/pretty
+         racket/set
+         racket/syntax
+         racket/trace
+         syntax/parse
          syntax/srcloc
          "common.rkt"
          "language.rkt"
          "tast.rkt"
-         "types.rkt"
-         racket/pretty
-         racket/trace)
+         "types.rkt")
 (provide parse-language
          parse-reduction-relation
          TopPreType ClosedTopPreType
@@ -33,12 +38,12 @@
          [(hash-has-key? US x) (mk-TName sy x taddr)]
          [else (break #f)])]
        ;; boilerplate
-       [(Tμ: sy x (Scope t) r c n) (mk-Tμ sy x (Scope (rename t)) r c n)]
+       [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (rename t)) tr n)]
        [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (rename t)))]
        [(or (? T⊤?) (? TAddr?) (? TBound?)) t]
        [(TSUnion: sy ts) (mk-TSUnion sy (map rename ts))]
        [(TRUnion: sy ts) (mk-TRUnion sy (map rename ts))]
-       [(TVariant: sy name ts r c) (mk-TVariant sy name (map rename ts) r c)]
+       [(TVariant: sy name ts tr) (mk-TVariant sy name (map rename ts) tr)]
        [(TCut: sy t u) (mk-TCut sy (rename t) (rename u))]
        [(TMap: sy t-dom t-rng ext) (mk-TMap sy (rename t-dom) (rename t-rng) ext)]
        [(TSet: sy t ext) (mk-TSet sy (rename t) ext)]))))
@@ -59,14 +64,17 @@ single address space
 |#
 
 (define-splicing-syntax-class Unrolling
-  #:attributes (bounded? trust? n)
+  #:attributes (trust n)
   (pattern (~seq (~or (~optional (~and trec #:bounded))
                       (~optional (~and tcon #:trust-construction))
                       (~optional (~seq #:unfold sn:nat))) ...)
-           #:attr bounded? (syntax? (attribute trec))
-           #:attr trust? (syntax? (attribute tcon))
-           #:fail-when (and (attribute sn)
-                            (or (attribute bounded?) (attribute trust?)))
+           #:fail-when (and (attribute trec) (attribute tcon))
+           "Cannot specify both #:bounded and #:trust-construction"
+           #:attr trust (cond
+                         [(syntax? (attribute trec)) 'bounded]
+                         [(syntax? (attribute tcon)) 'trusted]
+                         [else 'untrusted])
+           #:fail-unless (implies (attribute sn) (untrusted? (attribute trust)))
            "Cannot specify both #:unfold and either #:bounded or #:trust-construction"
            #:attr n (if (attribute sn) (syntax-e #'sn) 0)))
 
@@ -111,9 +119,9 @@ single address space
      [else
       (mk-TFree x sym taddr)])))
 
-(define-syntax-class (PreType bounded? trust? Unames Enames meta-table)
+(define-syntax-class (PreType trust Unames Enames meta-table)
   #:attributes (t)
-  #:local-conventions ([#rx"^t" (PreType bounded? trust? Unames Enames meta-table)])
+  #:local-conventions ([#rx"^t" (PreType trust Unames Enames meta-table)])
   (pattern ((~or #:Λ #:∀ #:all) (~or (~and x:id (~bind [(xs 1) (list #'x)]))
                                      (xs:id ...))
             tbody)
@@ -123,8 +131,7 @@ single address space
                                     #:taddrs (map (λ _ limp-default-Λ-addr) (attribute xs))))
   (pattern (~and sy
                  (#:μ x:id (~var ty:expr) u:Unrolling
-                      (~parse (~var tbody (PreType (attribute u.bounded?)
-                                                   (attribute u.trust?)
+                      (~parse (~var tbody (PreType (attribute u.trust)
                                                    Unames Enames meta-table))
                               #'ty)))
            #:do [(define fv (free (attribute tbody.t)))
@@ -136,8 +143,7 @@ single address space
            #:attr t (if recursive?
                         (mk-Tμ #'sy (syntax-e #'x)
                                (abstract-free (attribute tbody.t) (syntax-e #'x))
-                               (attribute u.bounded?)
-                               (attribute u.trust?)
+                               (attribute u.trust)
                                (attribute u.n))
                         (attribute tbody.t)))
   (pattern (~and sy (#:inst tf ta ...+))
@@ -156,8 +162,7 @@ single address space
            #:attr t (mk-TVariant #'sy
                                  (syntax-e #'n)
                                  (attribute ts.t)
-                                 bounded?
-                                 trust?))
+                                 trust))
   (pattern x:id #:attr t
            (->ref #'x Unames Enames meta-table #f))
   (pattern [#:ref x:id (~var modes (EM-Modes #t #f))]
@@ -175,18 +180,12 @@ single address space
 
 (define-syntax-class (TopPreType Unames Enames meta-table)
   #:attributes (t)
-  (pattern (~var ty (PreType #f #f Unames Enames meta-table))
+  (pattern (~var ty (PreType 'untrusted Unames Enames meta-table))
            #:attr t (attribute ty.t)))
 
 (define-syntax-class ClosedTopPreType
   #:attributes (t)
-  (pattern (~var ty (TopPreType ∅ ∅ #hasheq())) #:attr t (attribute ty.t)))
-
-(module+ test
-  (test-true "Pretype success"
-             (syntax-parse #'(#:μ List (#:Λ y (#:∪ (mt) (cons y (#:inst List y)))))
-               [(~var dummy (TopPreType ∅ ∅ #hasheq())) #t]
-               [_ #f])))
+  (pattern (~var ty (PreType 'untrusted ∅ ∅ #hasheq())) #:attr t (attribute ty.t)))
 
 (define-syntax-class Lookup-Mode
   #:attributes (lm)
@@ -532,26 +531,30 @@ Turn all free non-metavariables into external space names if they are bound.
            #:do [(define dup (check-duplicate-identifier (attribute metas)))]
            #:fail-when dup
            (format "Space has duplicate metavariable identifiers (~a): ~a" (syntax-e #'name) dup)
-           #:attr info (vector (attribute u.bounded?)
-                               (attribute u.trust?)
+           #:attr info (vector (attribute u.trust)
                                (attribute u.n))))
 
 (define-syntax-class (User-cls options Unames Enames meta-table space-info)
   #:attributes ((metas 1) name ty)
   #:description "Specify a user-defined value space"
-  (pattern [(~optional (metas:id ...) #:defaults ([(metas 1) '()]))
-            name:id
-            (~or (~seq #:full (~commit (~var fty (TopPreType Unames Enames meta-table))))
-                 (~commit (~seq (~var sty (TopPreType Unames Enames meta-table)) ...)))
-            ;; shape only
-            u:Unrolling]
-           #:fail-when (and (attribute fty.t) (attribute u))
-           "Cannot specify full type and use #:bounded, #:trust-construction, or #:unfold"
-           #:do [(define pre-ty (*TRUnion #'(sty ...) (attribute sty.t)))]
-           #:fail-unless (set-empty? (free pre-ty))
-           (format "Space's type contains free variables: ~a (~a)"
-                   (syntax-e #'name) (free pre-ty)) ;; TODO: give free variables
-           #:attr ty pre-ty))
+  (pattern
+   (~and
+    ;; get the trust info first
+    [(~optional (:id ...)) :id (~or (~seq #:full :expr) (~seq :expr ...)) u:Unrolling]
+    ;; use trust withing type parsing.
+    [(~optional (metas:id ...) #:defaults ([(metas 1) '()]))
+     name:id
+     (~or (~seq #:full (~commit (~var fty (PreType (attribute u.trust) Unames Enames meta-table))))
+          (~commit (~seq (~var sty (PreType (attribute u.trust) Unames Enames meta-table)) ...)))
+     ;; shape only
+     :Unrolling])
+   #:fail-when (and (attribute fty.t) (attribute u))
+   "Cannot specify full type and use #:bounded, #:trust-construction, or #:unfold"
+   #:do [(define pre-ty (*TRUnion #'(sty ...) (attribute sty.t)))]
+   #:fail-unless (set-empty? (free pre-ty))
+   (format "Space's type contains free variables: ~a (~a)"
+           (syntax-e #'name) (free pre-ty)) ;; TODO: give free variables
+   #:attr ty pre-ty))
 
 (define-splicing-syntax-class Lang-options-cls
   #:attributes (options)
@@ -640,14 +643,14 @@ Turn all free non-metavariables into external space names if they are bound.
         (begin
           (set-add! seen ty)
           (match ty
-            [(or (Tμ: _ _ (Scope t) _ _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
+            [(or (Tμ: _ _ (Scope t) _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
              (check t)]
             [(or (? T⊤?) (? TAddr?) (? TExternal?) (? TName?) (? TBound?) (? TFree?)) #f]
             [(or (TSUnion: sy ts) (TRUnion: sy ts))
              (if (contains-externalized? ts)
                  (or sy #t)
                  (ormap check ts))]
-            [(TVariant: _ name ts r c) (ormap check ts)]
+            [(TVariant: _ name ts _) (ormap check ts)]
             [(TCut: _ t* u) (check (resolve ty))]
             [(TMap: _ t-dom t-rng _)
              (or (check t-dom)
@@ -722,7 +725,7 @@ Turn all free non-metavariables into external space names if they are bound.
      ;; TODO: check that rules' patterns match (name args ...) for the type of name.
      (Metafunction (syntax-e #'name)
                    (quantify-frees
-                    (TArrow (TVariant (syntax-e #'name) (attribute formals.t) #f #f)
+                    (TArrow (TVariant (syntax-e #'name) (attribute formals.t) 'untrusted)
                             (attribute ret.t))
                     (rev-map syntax-e (attribute ta)))
                    (attribute r))]))

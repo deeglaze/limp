@@ -31,19 +31,20 @@
    (mk-TVariant #f 'foo (list (mk-TFree #f 'a #f) 
                               (mk-TCut #f
                                        (mk-TName #f 'List #f)
-                                       (mk-TFree #f 'a #f))) #f #f))
+                                       (mk-TFree #f 'a #f)))
+                'untrusted))
 
  (check-equal? foo-a-list-a
                (parse-type #'(foo a (#:inst List a)) (set 'List)))
 
  ;; (foo x y)
  (define foo-x-y
-   (mk-TVariant #f 'foo (list (mk-TFree #f 'x #f) (mk-TFree #f 'y #f)) #f #f))
+   (mk-TVariant #f 'foo (list (mk-TFree #f 'x #f) (mk-TFree #f 'y #f)) 'untrusted))
 
  (check-equal? foo-x-y (parse-type #'(foo x y)))
 
  ;; (foo ⊤ ⊤)
- (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) #f #f))
+ (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
 (type-print-verbosity 2)
@@ -52,7 +53,7 @@
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
-                                         (list (mk-TVariant #f 'blah (list) #f #f)
+                                         (list (mk-TVariant #f 'blah (list) 'untrusted)
                                                foo-a-list-a))
                                'a
                                limp-default-Λ-addr)))
@@ -85,7 +86,7 @@
  (parameterize ([current-language
                  (Language #hash() #hash() ∅ (make-hash us-test) us-test  #hash() (make-hash))])
    (check-equal?
-    (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) 'dc 'dc)))
+    (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) 'dc)))
     (set (quantify-frees foo-x-y '(y x))
          (quantify-frees foo-a-list-a '(a)))
     "Simplified")
@@ -103,10 +104,10 @@
 
 (parameterize ([current-language
                 (parse-language
-                 #'([Expr (app Expr Expr) x (lam x Expr)]
+                 #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]
                     [(x) #:external Name #:parse identifier?]
                     [Value (Clo x Expr Env)]
-                    [(ρ) Env (#:map Name Value)]
+                    [(ρ) Env (#:map Name Value #:externalize)]
                     [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
                     [(φ) Frame (ar Expr Env) (fn Value)]
                     [(κ) Kont (#:inst List Frame)]
@@ -127,14 +128,17 @@
                                  [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
                                         (ap z e ρ v κ)]
 
-                                 [#:--> (ap w e ρ v κ)
+                                 [#:--> #:name fun-app
+                                        (ap w e ρ v κ)
                                         (ev e (#:extend ρ w v) κ)])))
   (check-true
-   (hash-ref (recursive-nonrecursive
-              (Language-user-spaces
-               (current-language)))
-             'List
-             #f)
+   (set-member?
+    (hash-ref (recursive-nonrecursive
+               (Language-user-spaces
+                (current-language)))
+              (Space 'List)
+              ∅)
+    (Ref 'List))
    "List is recursive")
 
   (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
