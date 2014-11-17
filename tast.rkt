@@ -54,14 +54,14 @@ and semantics.
         [(PSet-with* _ _ v p) `(#:set-with* ,(rec v)
                                             ,(rec p))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
-        [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
+        [(PIsExternal _ (Cast (TExternal: _ name _))) `(#:is-external ,name)]
         [(PIsAddr _ (Cast (TAddr: _ space mm em _))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
         [(PIsType _ (Cast τ)) `(#:is-type FUCK)] ;; printer will handle τ
         [_ `(error$ ,(format "Unsupported pattern: ~a" (struct->vector p)))]))
     (case v
       [(0) sexp]
       [(1) (ann-wrap (Typed-ct p) sexp)]
-      [else (parameterize ([type-print-verbosity 1])
+      [else (parameterize ([type-print-verbosity (sub1 v)])
               (ann-wrap (Typed-ct p) sexp))])))
 
 (define (pattern-replace-ct ct p)
@@ -169,7 +169,7 @@ Template:
     [(Set sy ct s) (for/fold ([t '#:empty-set])
                     ([v (in-set s)])
                   `(#:add ,t ,(term->sexp v)))]
-    [(External _ (Check (TExternal: _ name)) v) `(#:external ,name ,v)]
+    [(External _ (Check (TExternal: _ name _)) v) `(#:external ,name ,v)]
     [_ `(error$ ,(format "Unsupported term ~a" t))]))
 
 (define (term-replace-ct ct t)
@@ -250,7 +250,7 @@ template
     (case v
       [(0) sexp]
       [(1) (ann-wrap (Typed-ct e) sexp)]
-      [else (parameterize ([type-print-verbosity 1])
+      [else (parameterize ([type-print-verbosity (sub1 v)])
               (ann-wrap (Typed-ct e) sexp))])))
 
 (define (expr-replace-ct ct e)

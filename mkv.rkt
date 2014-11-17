@@ -10,20 +10,46 @@
          racket/set
          racket/trace)
 (provide language->mkV
-         recursive-nonrecursive
-         ;; for testing
-         Space Ref
-         )
+         recursive-nonrecursive)
 #|
 Transform a language into a skeleton mkV, with a feedback loop for improving the allocation rules.
+
+The primary difficulty in this type system is determining which positions of
+collection constructions are "recursive," i.e., allow unbounded nesting.
+
+If a type of container construction (EVariant, EAdd or EExtend),
+through structural links and resolution reaches a supertype of itself,
+then it is self-referential.
+Inner positions that are self-referential types must then be heap-allocated.
+
+Example:
+ Types
+ ------
+ List = Λ X. (Nil) + (Cons X (List X))
+ Kont = List[Frame]
+ Frame = (ar Expr Env) + (fn Value)
+ State = (ev Expr Env Kont) + ...
+
+ Expression
+ ----------
+ e0, e1 : Expr, ρ: Env, κ: Kont ⊢ (ev e0 ρ (Cons (ar e1 ρ) κ))
+
+ What must be heap allocated?
+ The ev container is not self-referential, so we continue recursively.
+ e0 and ρ are not container constructors, but references. Done.
+ The Cons expressios is a container constructor.
+ The type of the expression is (Cons (ar Expr Env) Kont).
+ Kont resolves to (Nil) + (Cons Frame (List Frame)).
+ (Cons Frame (List Frame)) is a supertype of (Cons (ar Expr Env) Kont).
+ Therefore this constructor has a self-referential type.
+ The (ar Expr Env) type is not self-referential and may be kept in place.
+ The Kont type has (List Frame) reachable through resolution and structure, so
+ it is self-referential and must be heap-allocated.
+
 |#
 
 ;; Unfolding and subtyping has difficult interactions that I don't have time to mess with
 ;; before graduating.
-
-(struct Space (x) #:prefab)
-(struct Ref (x) #:prefab)
-(struct Container (τ) #:prefab)
 
 (define (mk-scc-map sccs)
   (for*/hash ([scc (in-list sccs)]
@@ -35,63 +61,70 @@ Transform a language into a skeleton mkV, with a feedback loop for improving the
 (define (bool->trust b) (if b 'trusted 'untrusted))
 
 (define (type->edges t)
-  (define (link-to t* trust)
-    (match t*
-      ;; If a name is due to be addrized anyway, don't count that as a route to recursion.
-      [(TName: _ n #f)
-       (if (untrusted? trust)
-           (list (list (Container t) (Ref n)))
-           '())]
-      [_ '()]))
-  (define (types->edges ts tr)
-    (let mk-links ([ts ts] [edges '()])
+  (define seen (mutable-seteq))
+  (let rec ([t t])
+   (define (link-to t* trust)
+     (match t*
+       ;; If a name is due to be addrized anyway, don't count that as a route to recursion.
+       [(TName: _ n taddr)
+        (if (and (not taddr) (untrusted? trust))
+            (list (list t t*))
+            '())]
+       ;; any taddr given -> unlinked
+       [(or (TFree: _ _ taddr) (TBound: _ _ taddr))
+        (if taddr '() (list (list t t*)))]
+       [_ (list (list t t*))]))
+   (define (types->edges ts [tr 'untrusted])
+     (let mk-links ([ts ts] [edges '()])
        (match ts
          ['() edges]
          [(cons t* ts)
-          (mk-links ts (append (link-to t* tr) (type->edges t*) edges))])))
-  (match t
-    ;; All name references should be edged in from the containers
-    [(TName: _ n taddr) '()]
-    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?)) '()]
-    [(TVariant: _ _ ts tr) (types->edges ts tr)]
-    [(TMap: _ t-dom t-rng _)
-     (types->edges (list t-dom t-rng) 'untrusted)]
-    [(TSet: _ tv ext)
-     (types->edges (list tv) 'untrusted)]
-    ;; boilerplate
-    [(or (Tμ: _ _ (Scope t) _ _)
-         (TΛ: _ _ (Scope t)))
-     (types->edges (list t) 'untrusted)]
-    ;; Resimplify, since unification may have bumped some stuff up.
-    [(or (TSUnion: _ ts)
-         (TRUnion: _ ts))
-     (types->edges ts 'untrusted)]
-    ;; Don't resolve
-    [(TCut: _ t u)
-     (types->edges (list t u) 'untrusted)]
-    [_ (error 'type->edges "Bad type ~a" t)]))
+          (mk-links ts (append (link-to t* tr) (rec t*) edges))])))
+   (cond
+    [(set-member? seen t) '()]
+    [else
+     (set-add! seen t)
+     (match t
+       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?) (? TFree?)) '()]
+       [(TVariant: _ _ ts tr) (types->edges ts tr)]
+       [(TMap: _ t-dom t-rng _)
+        (types->edges (list t-dom t-rng))]
+       [(TSet: _ tv ext)
+        (types->edges (list tv))]
+       [(Tμ: _ x st tr _)
+        (types->edges (list (if (untrusted? tr)
+                                (open-scope st t)
+                                (open-scope st (mk-TFree #f (gensym x) 'trusted)))))]
+       [(TΛ: _ x st) (types->edges (list (open-scope st (mk-TFree #f (gensym x) #f))))]
+       ;; Resimplify, since unification may have bumped some stuff up.
+       [(or (TSUnion: _ ts)
+            (TRUnion: _ ts))
+        (types->edges ts)]
+       [(TCut: _ u s) (types->edges (list u s (resolve t)))]
+       [(? TName?) (types->edges (list (resolve t)))]
+       [_ (error 'type->edges "Bad type ~a" t)])])))
 
 ;; All containers are nodes (variants, maps, sets)
 ;; All spaces have definition nodes and reference nodes.
 ;; If a container can reach itself, then its immediate space references
 ;;  within the SCC are addrized unless not 'untrusted.
 ;; Produce a map from type to SCC
-(define (recursive-nonrecursive user-spaces)
+(define (recursive-nonrecursive all-types)
   (define adj
     (append
-     ;; Def to Ref (transitive through containers)
-#;
-     (for/list ([(name ty) (in-hash user-spaces)])
-       (cons (Space name) (set-map (names ty) Ref)))
-     ;; Def to containers, and containers to refs
-     (for/append ([(name ty) (in-hash user-spaces)])
-       (define edges (type->edges ty))
-       (cons (cons (Space name) (map first edges)) edges))
-     ;; Ref to Def
-     (for/list ([name (in-hash-keys user-spaces)])
-       (list (Ref name) (Space name)))))
+     (for/append ([ty (in-set all-types)])
+       (type->edges ty))
+     ;; Connect subtypes
+     (for*/list ([ty0 (in-set all-types)]
+                 [ty1 (in-set all-types)]
+                 #:when (and (not (equal? ty0 ty1)) (<:? ty0 ty1)))
+       (list ty0 ty1))))
   (define G (unweighted-graph/adj adj))
   (define SCC (scc G))
+  (displayln "Graph")
+  (pretty-print adj)
+  (displayln "SCCs")
+  (pretty-print SCC)
   ;; TODO: error on bad externalizations.
   ;; TODO: check that trust/boundedness is the same within an SCC
   (mk-scc-map SCC))
@@ -108,47 +141,64 @@ without an intervening variant constructor.
     [(ty)
      (define (build t)
        (define (alloc-immediate t*)
-         (define SCC (hash-ref space-recursion (Container t) ∅))
+         (define SCC (hash-ref space-recursion t '()))
          ;; if t* is in t's SCC, then we allocate it.
          (match t*
            [(TName: _ n taddr)
-            #:when (and (set-member? SCC (Space n))
-                        ;; Externalized maps/sets are unlinked.
-                        (match (hash-ref Γ n)
-                          [(or (TMap: _ _ _ #t) (TSet: _ _ #t)) #f]
-                          [_ #t]))
-            (or taddr limp-default-rec-addr)]
-           [_ t*]))
+            (or taddr
+                (let ([τ (resolve t*)]
+                      [U (mk-TRUnion #f SCC)])
+                  (if (and (or (<:? t* U)
+                               (<:? τ U))
+                           (match τ
+                             [(or (TMap: _ _ _ #t) (TSet: _ _ #t)) #f]
+                             [_ #t]))
+                      limp-default-rec-addr
+                      t*)))]
+           [_ (if (set-member? SCC t*)
+                  limp-default-rec-addr
+                  t*)]))
+       (trace alloc-immediate)
        (or (hash-ref h t #f)
            (let
                ([ty*
-                 (match t
-                   [(Tμ: _ _ st _ _) (build (open-scope st -addrize))]
-                   [(TName: _ x taddr) (or taddr t)]
-                   [(? T⊤?) limp-default-⊤-addr] ;; All anys must be heap-allocated
-                   [(TVariant: _ name ts tr)
-                    (if (untrusted? tr)
-                        (mk-TVariant #f name (map alloc-immediate ts) tr)
-                        (mk-TVariant #f name (map build ts) tr))]
-                   [(TMap: _ t-dom t-rng ext)
-                    (mk-TMap #f (alloc-immediate t-dom) (alloc-immediate t-rng) ext)]
-                   [(TSet: _ t ext)
-                    (mk-TSet #f (alloc-immediate t) ext)]
-                   ;; boilerplate
-                   [(or (? TAddr?) (? TBound?) (? TExternal?)) t]
-                   [(TΛ: _ _ (Scope t)) (build t)]
-                   [(TSUnion: _ ts) (*TSUnion #f (map build ts))]
-                   [(TRUnion: _ ts) (*TRUnion #f (map build ts))]
-                   [(TCut: _ t u)
-                    (match (resolve t #:addrize space-recursion)
-                      [(TΛ: _ _ s)
-                       (build (open-scope s -addrize))]
-                      [(? TAddr? τ)
-                       τ]
-                      [τ (error 'map-variants-to-rewritten-type "Bad cut: ~a" τ)])])])
+                 (begin
+                   ;; Temporary trusted self-reference
+                   (hash-set! h t t)
+                   (match t
+                     [(Tμ: _ _ st _ _) (build (open-scope st -addrize))]
+                     [(or (TName: _ _ taddr) (TExternal: _ _ taddr)) (or taddr t)]
+
+                     [(? T⊤?) limp-default-⊤-addr] ;; All anys must be heap-allocated
+                     [(TVariant: _ name ts tr)
+                      (if (untrusted? tr)
+                          (mk-TVariant #f name (map alloc-immediate ts) tr)
+                          (mk-TVariant #f name (map build ts) tr))]
+                     [(TMap: _ t-dom t-rng ext)
+                      (mk-TMap #f (alloc-immediate t-dom) (alloc-immediate t-rng) ext)]
+                     [(TSet: _ t ext)
+                      (mk-TSet #f (alloc-immediate t) ext)]
+                     ;; boilerplate
+                     [(or (? TAddr?) (? TBound?)) t]
+                     [(TΛ: _ _ (Scope t)) (build t)]
+                     [(TSUnion: _ ts) (*TSUnion #f (map build ts))]
+                     [(TRUnion: _ ts) (*TRUnion #f (map build ts))]
+                     [(TCut: _ t u)
+                      (match (resolve
+                              t
+                              #:addrize
+                              (λ (x) (for/or ([t (in-set (hash-ref space-recursion (hash-ref Γ x #f) ∅))]
+                                              #:when (TName? t))
+                                       (eq? x (TName-x t)))))
+                        [(TΛ: _ _ s)
+                         (build (open-scope s -addrize))]
+                        [(? TAddr? τ)
+                         τ]
+                        [τ (error 'map-variants-to-rewritten-type "Bad cut: ~a" τ)])]))])
              (hash-set! h t ty*)
              ty*)))
-    (build ty)]))
+     (trace build)
+     (build ty)]))
 
 (define (populate-bu-rules tr vh eh path bu)
   (match bu
@@ -156,10 +206,20 @@ without an intervening variant constructor.
      (populate-expr-rules tr vh eh `(update-key . ,path) k)
      (populate-expr-rules tr vh eh `(update-value . ,path) v)]
     [(Where _ pat e)
-     (populate-expr-rules tr vh eh `(where-rhs . ,path) e)]))
+     (populate-expr-rules tr vh eh `(where-rhs . ,path) e)]
+    [_ (error 'populate-bu-rules "Bad bu ~a" bu)]))
+
+(define ((populate-bu-types! add!) bu)
+  (define E (populate-expr-types! add!))
+  (match bu
+    [(Update _ k v) (E k) (E v)]
+    [(Where _ pat e)
+     ((populate-pattern-types! add!) pat)
+     (E e)]
+    [_ (error 'populate-bu-types! "Bad bu ~a" bu)]))
 
 (define (implicit-translation? τ)
-  (or (and (TAddr? τ) (TAddr-implicit? τ))))
+  (and (TAddr? τ) (TAddr-implicit? τ)))
 
 (define (populate-expr-rules tr vh eh path e)
   (match e
@@ -179,7 +239,7 @@ without an intervening variant constructor.
        (populate-expr-rules tr vh eh `((,n . ,i) . ,path) e))
      (when (pair? to-alloc)
        (hash-set! vh (or tag path) to-alloc))]
-    
+
     [(EExtend _ ct m tag k v)
      (displayln e)
      (populate-expr-rules tr vh eh `(extend-map . ,path) m)
@@ -203,7 +263,7 @@ without an intervening variant constructor.
        (populate-expr-rules tr vh eh `((call ,mf . ,i) . ,path) e))]
 
     [(EStore-lookup _ ct k lm) (populate-expr-rules tr vh eh `(lookup . path) k)]
-    
+
     [(ELet _ ct bus body)
      (for ([bu (in-list bus)]
            [i (in-naturals)])
@@ -240,24 +300,99 @@ without an intervening variant constructor.
      (populate-expr-rules tr vh eh `(map-remove-key . ,path) k)]
 
     [(or (? ERef?) (? EAlloc?) (? EEmpty-Map?) (? EEmpty-Set?)) (void)]
-    [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
+    [_ (error 'populate-expr-rules "Unrecognized expression form: ~a" e)]))
+
+(define (populate-pattern-types! add!)
+  (define (self pat)
+    (add! (πcc pat))
+    (match pat
+      [(or (PAnd _ _ ps) (PVariant _ _ _ ps)) (for-each self ps)]
+      [(or (PMap-with _ _ k v p) (PMap-with* _ _ k v p))
+       (for-each self (list k v p))]
+      [(or (PSet-with _ _ v p) (PSet-with* _ _ v p))
+       (self v) (self p)]
+      [(PTerm _ _ t) ((populate-term-types! add!) t)]
+      [(or (? PWild?) (? PIsExternal?) (? PIsAddr?) (? PIsType?) (? PName?)) (void)]
+      [_ (error 'populate-pattern-types! "Unsupported pattern: ~a" pat)]))
+  self)
+
+(define (populate-term-types! add!)
+  (define (self t)
+    (add! (πcc t))
+    (match t
+      [(Variant _ _ _ ts) (for-each self ts)]
+      [(Map _ _ f) (hash-for-each f (λ (k v) (self k) (self v)))]
+      [(Set _ _ s) (set-for-each s self)]
+      [(? External?) (void)]
+      [_ (error 'populate-term-types! "Unsupported term ~a" t)]))
+  self)
+
+(define (populate-expr-types! add!)
+  (define (self e)
+    (add! (πcc e))
+    (match e
+      ;; For each e in es with an implicit TAddr type, introduce a new rule.
+      [(or (EVariant _ _ _ _ τs es)
+           (ECall _ _ _ τs es))
+       (for-each add! τs)
+       (for-each self es)]
+
+      [(EExtend _ _ m _ k v)
+       (for-each self (list m k v))]
+
+      [(EStore-lookup _ _ k _) (self k)]
+
+      [(ELet _ _ bus body)
+       (for-each (populate-bu-types! add!) bus)
+       (self body)]
+      [(EMatch _ _ de rules)
+       (self de)
+       (for-each (populate-rule-types! add!) rules)]
+      [(ESet-union _ _ es) (for-each self es)]
+      [(or (ESet-intersection _ _ e es)
+           (ESet-subtract _ _ e es)) (self e) (for-each self es)]
+      [(or (ESet-member _ _ e0 e1)
+           (EMap-lookup _ _ e0 e1)
+           (EMap-has-key _ _ e0 e1)
+           (EMap-remove _ _ e0 e1))
+       (self e0)
+       (self e1)]
+
+      [(or (? ERef?) (? EAlloc?) (? EEmpty-Map?) (? EEmpty-Set?)) (void)]
+      [_ (error 'populate-rule-types! "Unrecognized expression form: ~a" e)]))
+  self)
 
 (define (populate-rule-rules tr vh eh path rule)
-  (match-define (Rule _ name lhs rhs bus) rule)
-  (define path* `((Rule ,name) . ,path))
-  (for ([bu (in-list bus)]
-        [i (in-naturals)])
-    (populate-bu-rules tr vh eh `((bu . ,i) . ,path*) bu))
-  (populate-expr-rules tr vh eh `(rhs . ,path*) rhs))
+  (match rule
+    [(Rule _ name lhs rhs bus)
+     (define path* `((Rule ,name) . ,path))
+     (for ([bu (in-list bus)]
+           [i (in-naturals)])
+       (populate-bu-rules tr vh eh `((bu . ,i) . ,path*) bu))
+     (populate-expr-rules tr vh eh `(rhs . ,path*) rhs)]
+    [_ (error 'populate-rule-rules "Bad rule ~a" rule)]))
+
+(define ((populate-rule-types! add!) rule)
+  (match rule
+    [(Rule _ _ lhs rhs bus)
+     ((populate-pattern-types! add!) lhs)
+     (for-each (populate-bu-types! add!) bus)
+     ((populate-expr-types! add!) rhs)]
+    [_ (error 'populate-rule-types "Bad rule ~a" rule)]))
 
 (define (language->mkV R alloc)
   (define L (current-language))
   (define us (Language-user-spaces L))
-  (define space-recursion (recursive-nonrecursive us))
+
+  (define all-types (mutable-set)) (define (add! τ) (set-add! all-types τ))
+  (for ([t (in-hash-values us)]) (add! t))
+  (for-each (populate-rule-types! add!) R)
+  ;; Will be updated any time we translate new types.
+  (define space-recursion (recursive-nonrecursive all-types))
   ;; Rewrite language user spaces to addrize the recursive references
   ;; Assign allocation behavior to each variant in Γ
-    (define ty-to-mkv (make-hash))
-    (define translate (map-variants-to-rewritten-type ty-to-mkv space-recursion us))
+  (define ty-to-mkv (make-hash))
+  (define translate (map-variants-to-rewritten-type ty-to-mkv space-recursion us))
     (for ([(name ty) (in-hash us)])
       (translate ty))
 
@@ -281,13 +416,13 @@ without an intervening variant constructor.
     ;; If we output this as a Racket function, then we don't,
     ;;  but we have to use the store updating functions.
 
-    ;; 
+    ;;
 
     ;; Each rule could be the same on the left and different on the right.
     ;; We need to know the rule to generate the address? Sure, this comes from alloc.
 
     ;; FIXME: Pseudocode
-  
+
     `(λ (ς σ μ ρ δ σΔ μΔ n tag ts)
         ;; and τ of requested variant, want rule requesting, and position requesting
         wut))

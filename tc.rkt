@@ -12,9 +12,9 @@
 
 ;; TODO: syntax location tracking and reporting
 (define ((unbound-mf sy who f))
-  (raise-syntax-error sy "~a: Unbound metafunction name ~a" who f))
+  (raise-syntax-error who (format "Unbound metafunction name ~a" f) sy))
 (define ((unbound-pat-var sy who x))
-  (raise-syntax-error sy "~a: Unbound pattern variable: ~a" who x))
+  (raise-syntax-error who (format "Unbound pattern variable: ~a" x) sy))
 
 (define (num-top-level-Λs τ)
   (let count ([τ τ] [i 0])

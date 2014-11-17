@@ -1,7 +1,9 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/syntax racket/base)
+         (only-in racket/function const)
          racket/list racket/match racket/set (only-in racket/function curry)
          racket/trace
+         (only-in unstable/sequence in-pairs)
          "common.rkt" "language.rkt")
 (provide (all-defined-out))
 
@@ -18,55 +20,59 @@
 (struct addrize ()) (define -addrize (addrize))
 
 (define type-print-verbosity (make-parameter 0))
+
+(define (as-named τ)
+  (define us (Language-ordered-us (current-language)))
+  (define clean (if (> (type-print-verbosity) 0)
+                    (λ (name) `(fold$ ,name))
+                    values))
+  (for/first ([(name σ) (in-pairs us)] #:when (equal? τ σ))
+    (clean name)))
+
 (define (type->sexp t)
   (define v (type-print-verbosity))
   (let rec ([t t])
-    (match t
-      [(TName: _ x taddr)
-       (if (> v 1)
-           (if taddr
-               `(name$ ,x ,(rec taddr))
-               `(name$ ,x))
-           x)]
-      [(TFree: _ x taddr)
-       (if (> v 1)
-           (if taddr
-               `(ref$ ,x ,(rec taddr))
-               `(ref$ ,x))
-           x)]
-      [(or (and (Tμ: _ x st _ _) (app (λ _ '#:μ) head))
-           (and (TΛ: _ x st) (app (λ _ '#:Λ) head)))
-       `(,head ,x ,(rec (open-scope-hygienically st x)))]
-       [(TVariant: _ name ts tr)
-       (define base (cons name (map rec ts)))
-       (if (> v 0)
-           (append base
-                   (case tr
-                     [(bounded) '(#:bounded)]
-                     [(trusted) '(#:trust-construction)]
-                     [else '()]))
-           base)]
-       [(? T⊥?) '⊥]
-      [(or (and (TSUnion: _ ts) (app (λ _ '#:∪) head))
-           (and (TRUnion: _ ts) (app (λ _ '#:r∪) head)))
-       `(,head . ,(map rec ts))]
-      [(TMap: _ d r ext) `(↦ ,(rec d) ,(rec r) ,ext)]
-      [(TSet: _ s ext) `(℘ ,(rec s) ,ext)]
-      [(TCut: _ s u)
-       `(#:inst ,(rec s) ,(rec u))]
-      [(? T⊤?) '⊤]
-      [(TAddr: _ name mm em imp?) `(Addr ,name ,(s->k mm) ,(s->k em) ,imp?)]
-      [(TExternal: _ name)
-       (if (> v 0)
-           `(#:external ,name)
-           name)]
-      [(TArrow: _ dom rng) `(#:-> ,(rec dom) ,(rec rng))]
-      [(TBound: _ i taddr) `(deb$ ,i)]
-      ;; Non-types
-      [(TUnif τ) `(Unif$ ,(rec τ))]
-      [(TError msgs) `(Error . ,msgs)]
-      [#f '_] ;; Missing type
-      [_ `(Unknown$ ,(struct->vector t))])))
+    (define (ref head x taddr)
+      (if (> v 1)
+          (case taddr
+            [(#f) `(,head ,x)]
+            [(trusted) `(,head ,x trusted)]
+            [else `(,head ,x ,(rec taddr))])
+          x))
+    (or (as-named t)
+        (match t
+          [(TName: _ x taddr) (ref 'name$ x taddr)]
+          [(TFree: _ x taddr) (ref 'ref$ x taddr)]
+          [(TExternal: _ x taddr) (ref 'ext$ x taddr)]
+          [(or (and (Tμ: _ x st _ _) (app (λ _ '#:μ) head))
+               (and (TΛ: _ x st) (app (λ _ '#:Λ) head)))
+           `(,head ,x ,(rec (open-scope-hygienically st x)))]
+          [(TVariant: _ name ts tr)
+           (define base `(,name . ,(map rec ts)))
+           (if (> v 0)
+               (append base
+                       (case tr
+                         [(bounded) '(#:bounded)]
+                         [(trusted) '(#:trust-construction)]
+                         [else '()]))
+               base)]
+          [(? T⊥?) '⊥]
+          [(or (and (TSUnion: _ ts) (app (λ _ '#:∪) head))
+               (and (TRUnion: _ ts) (app (λ _ '#:r∪) head)))
+           `(,head . ,(map rec ts))]
+          [(TMap: _ d r ext) `(↦ ,(rec d) ,(rec r) ,ext)]
+          [(TSet: _ s ext) `(℘ ,(rec s) ,ext)]
+          [(TCut: _ s u)
+           `(#:inst ,(rec s) ,(rec u))]
+          [(? T⊤?) '⊤]
+          [(TAddr: _ name mm em imp?) `(Addr ,name ,(s->k mm) ,(s->k em) ,imp?)]
+          [(TArrow: _ dom rng) `(#:-> ,(rec dom) ,(rec rng))]
+          [(TBound: _ i taddr) `(deb$ ,i)]
+          ;; Non-types
+          [(TUnif τ) `(Unif$ ,(rec τ))]
+          [(TError msgs) `(Error . ,msgs)]
+          [#f '_] ;; Missing type
+          [_ `(Unknown$ ,(struct->vector t))]))))
 
 
 (define (write-type t port mode)
@@ -106,7 +112,7 @@
   (define (T⊥? x) (eq? T⊥ x))
 (define-type TRUnion (ts))
 (define-type TVariant (name ts trust))
-(define-type TExternal (name))
+(define-type TExternal (name taddr)) ;; References to externals can still be heap-allocated.
 (define-type Tμ (x st tr n)) ;; name for printing
 (define-type TΛ (x st))
 (define-type TCut (t u))
@@ -149,7 +155,9 @@
       [(TBound: _ i* taddr)
        (if (= i i*)
            (if (eq? t -addrize)
-               (or taddr t*)
+               (if (eq? taddr 'trusted)
+                   (error 'open-scope "Bound name has trust tag ~a" t*)
+                   (or taddr t*))
                t)
            t*)]
       [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (open t (add1 i))) tr n)]
@@ -162,7 +170,9 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
-      [(TUnif τ) (open τ i)]
+      ;; second-class citizens
+      [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
+      [(TUnif τ) (open* τ)]
       [_ (error 'open "Bad type ~a" t*)])))
 
 ;; predictable name generation over gensym.
@@ -203,6 +213,8 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      ;; second-class citizens
+      [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
       [(TUnif τ) (open* τ)]
       [_ (error 'open "Bad type ~a" t*)])))
 
@@ -235,7 +247,11 @@
      (match t
        [(TFree: sy x taddr)
         (if (equal? x name)
-            (mk-TBound sy i (or taddr taddr*)) ;; override typing if there isn't already one.
+            (mk-TBound sy i (cond
+                             [(eq? taddr 'trusted) #f] ;; 'trusted has behavior of #f when closed.
+                             [taddr] ;; return self
+                             ;; override typing if there isn't already one.
+                             [else (and (not (eq? taddr* 'trusted)) taddr*)]))
             t)]
        [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (abs t (add1 i))) tr n)]
        [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
@@ -247,6 +263,7 @@
        [(TVariant: sy name ts tr) (mk-TVariant sy name (map abs* ts) tr)]
        [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
        [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
+       [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
        [_ (error 'abstract-free "Bad type ~a" t)]))))
 
 ;; Remove mutable unification variables.
@@ -441,7 +458,7 @@
 (define limp-default-⊤-addr limp-default-Λ-addr)
 
 ;; resolve : Type Map[Name,Type] -> Maybe[Type]
-(define (resolve t [extra-Γ #f] #:addrize [rec-spaces #hasheq()])
+(define (resolve t [extra-Γ #f] #:addrize [rec-spaces (const #f)])
   (define Γ (Language-user-spaces (current-language)))
   (define Γcount (+ (hash-count Γ) (if extra-Γ (hash-count extra-Γ) 0)))
   (define orig t)
@@ -450,7 +467,7 @@
       (if (< 0 i)
           (match t
             [(TName: sy x taddr)
-             (match (hash-ref rec-spaces x #f)
+             (match (rec-spaces x)
                [#f
                 (match (hash-ref Γ x #f)
                   [#f
@@ -458,7 +475,8 @@
                      (error 'resolve "Missing extra context for ~a" x))
                    (mk-TName sy (hash-ref extra-Γ x) taddr)]
                   [τ (fuel τ (sub1 i))])]
-               [#t (or taddr limp-default-Λ-addr)])]
+               [#t (or taddr limp-default-Λ-addr)]
+               [bad (error 'resolve "Unexpected rec ~a" bad)])]
             [(Tμ: sy x st tr n)
              ;; INVARIANT: the only μs at this point are trusted.
              (when (untrusted? tr) (error 'resolve "Unfolds should be resolved first: ~a" t))
@@ -507,19 +525,20 @@
         [((TSet: _ τ lext) (TSet: _ σ rext))
          (and
           (or (equal? lext rext)
+              (eq? lext 'dc)
               (eq? rext 'dc))
           (<:?-aux A τ σ))]
         [((TMap: _ τk τv lext) (TMap: _ σk σv rext))
-         (and
-          (or (equal? lext rext)
-              (eq? rext 'dc))
+         (and (or (equal? lext rext)
+                  (eq? lext 'dc)
+                  (eq? rext 'dc))
           (seq A
                (<:?-aux A τk σk)
                (<:?-aux A σv σv)))]
         [((TΛ: _ _ sτ) (TΛ: _ _ sσ))
          (define name (mk-TFree #f (gensym 'dummy) #f))
          (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
-        [(_ (TExternal: _ name)) (and (set-member? E<: (cons τ name)) A)]
+        [(_ (TExternal: _ name _)) (and (set-member? E<: (cons τ name)) A)]
         [((? needs-resolve?) _)
          (<:?-aux (grow-A) (resolve τ ρ) σ)]
         [(_ (? needs-resolve?))
@@ -833,11 +852,11 @@
       (match t
         [(TFree: sy x taddr)
          (cond
-          [(set-member? Enames x) (mk-TExternal sy x)]
+          [(set-member? Enames x) (mk-TExternal sy x taddr)]
           [(hash-has-key? meta-names x)
            (define S (hash-ref meta-names x))
            (if (set-member? Enames S)
-               (mk-TExternal sy S)
+               (mk-TExternal sy S taddr)
                (mk-TName sy S taddr))]
           [else (break #f)])]
         ;; boilerplate

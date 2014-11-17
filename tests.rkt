@@ -48,8 +48,8 @@
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
 (type-print-verbosity 2)
-(pattern-print-verbosity 2)
-(expr-print-verbosity 2)
+(pattern-print-verbosity 3)
+(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -114,7 +114,7 @@
                     [State (ev Expr Env Kont)
                            (co Kont Value)
                            (ap x Expr Env Value Kont)]))])
-  (define R
+  (define CEK
     (parse-reduction-relation #'([#:--> (ev (app e0 e1) ρ κ)
                                         (ev e0 ρ (Cons (ar e1 ρ) κ))]
                                  [#:--> (ev (lam y e) ρ κ)
@@ -131,20 +131,83 @@
                                  [#:--> #:name fun-app
                                         (ap w e ρ v κ)
                                         (ev e (#:extend ρ w v) κ)])))
-  (check-true
-   (set-member?
-    (hash-ref (recursive-nonrecursive
-               (Language-user-spaces
-                (current-language)))
-              (Space 'List)
-              ∅)
-    (Ref 'List))
-   "List is recursive")
+ 
 
   (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
-  (define R** (tc-rules #hash() #hash() R Sτ Sτ))
-  (pretty-print R**)
+  (define CEK* (tc-rules #hash() #hash() CEK Sτ Sτ))
+  (pretty-print CEK*)
 
-  (report-all-errors R**)
+  (report-all-errors CEK*)
 
-  (language->mkV R** void)))
+  (language->mkV CEK* void))
+
+(parameterize ([current-language
+                (parse-language
+                 #'([Expr (app Expr Exprs) x (lam xs Expr) #:bounded]
+                    [Exprs (#:inst TList Expr)]
+                    [(x) #:external Name #:parse identifier?]
+                    [(xs) Names (#:inst TList Name)]
+                    [Value (Clo xs Expr Env)]
+                    [Values (#:inst TList Value)]
+                    [(ρ) Env (#:map Name Value #:externalize)]
+                    [TList (#:Λ [X #:trusted] (#:U (Nil) (TCons X (#:inst TList X))))
+                           #:trust-construction]
+                    [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
+                    [(φ) Frame (ev Exprs Values Env) (fn Value)]
+                    [(κ) Kont (#:inst List Frame)]
+                    [State (ev Expr Env Kont)
+                           (co Kont Value)
+                           (ap xs Expr Env Values Kont)]))])
+
+  (check-true
+   (let ([us (Language-user-spaces (current-language))])
+     (for/or ([t (in-set (hash-ref (recursive-nonrecursive (apply set (hash-values us)))
+                                   (hash-ref us 'TList) ∅))]
+              #:when (TName? t))
+       (eq? (TName-x t) 'TList)))
+   "TList is recursive")
+
+ (define CESK
+   (parse-reduction-relation #'([#:--> (ev (app e0 es) ρ κ)
+                                       (ev e0 ρ (Cons (ev es (Nil) ρ) κ))]
+                                [#:--> (ev (lam ys e) ρ κ)
+                                       (co κ (Clo ys e ρ))]
+                                [#:--> #:name var-lookup
+                                       (ev (#:and (#:has-type Name) x) ρ κ)
+                                       (co κ (#:map-lookup ρ x))]
+
+                                [#:--> (co (Cons (ev (TCons e es) vs ρ) κ) v)
+                                       (ev e ρ (Cons (ev es (TCons v vs) ρ) κ))]
+                                [#:--> (co (Cons (ev (Nil) vs ρ) κ) v)
+                                       (ap zs e ρ vs* κ)
+                                       [#:where (TCons (Clo zs e ρ) vs*)
+                                                (#:call reverse #:inst [Value] vs)]]
+
+                                [#:--> #:name fun-app
+                                       (ap ws e ρ vs κ)
+                                       (ev e (#:call extend* #:inst [Name Value] ρ ws vs) κ)])))
+
+ (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
+ (define metafunctions
+   (list
+    (parse-metafunction
+     #'(reverse : #:∀ (A) (#:inst TList A) → (#:inst TList A)
+                [(reverse xs) (#:call rev-app #:inst [A] xs (Nil))]))
+    (parse-metafunction
+     #'(rev-app : #:∀ (A) (#:inst TList A) (#:inst TList A) → (#:inst TList A)
+                [(rev-app (Nil) acc) acc]
+                [(rev-app (TCons x xs) acc)
+                 (#:call rev-app #:inst [A] xs (TCons x acc))]))
+    (parse-metafunction
+     #'(extend* : #:∀ (A B) (#:map A B) (#:inst TList A) (#:inst TList B) → (#:map A B)
+                [(extend* ρ (Nil) (Nil)) ρ]
+                [(extend* ρ (TCons a as) (TCons b bs))
+                 (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)]))))
+ (define Ξ (for/hash ([m (in-list metafunctions)])
+             (values (Metafunction-name m)
+                     (Metafunction-τ m))))
+ (define CESK* (tc-rules #hash() Ξ CESK Sτ Sτ))
+ (report-all-errors CESK*)
+
+ (language->mkV CESK* void)
+))
