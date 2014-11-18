@@ -149,7 +149,10 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (open-scope s t)
   (match-define (Scope t*) s)
-  (let open ([t* t*] [i 0])
+  (open-scope-aux t* 0 t))
+
+(define (open-scope-aux t* i t)
+  (let open ([t* t*] [i i])
     (define (open* t*) (open t* i))
     (match t*
       [(TBound: _ i* taddr)
@@ -173,7 +176,7 @@
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
       [(TUnif τ) (open* τ)]
-      [_ (error 'open "Bad type ~a" t*)])))
+      [_ (error 'open-scope "Bad type ~a" t*)])))
 
 ;; predictable name generation over gensym.
 (define (fresh-name supp base)
@@ -240,31 +243,33 @@
       [(TSet: sy t ext) (mk-TSet sy (subst t) ext)]
       [_ (error 'subst-name "Bad type ~a" t)])))
 
+(define (abstract-free-aux t i name taddr*)
+  (let abs ([t t] [i i])
+    (define (abs* t) (abs t i))
+    (match t
+      [(TFree: sy x taddr)
+       (if (equal? x name)
+           (mk-TBound sy i (cond
+                            [(eq? taddr 'trusted) #f] ;; 'trusted has behavior of #f when closed.
+                            [taddr]                   ;; return self
+                            ;; override typing if there isn't already one.
+                            [else (and (not (eq? taddr* 'trusted)) taddr*)]))
+           t)]
+      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (abs t (add1 i))) tr n)]
+      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
+      ;; boilerplate
+      [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TUnif?) (? TError?)) t]
+      [(TSUnion: sy ts) (mk-TSUnion sy (map abs* ts))]
+      [(TRUnion: sy ts) (mk-TRUnion sy (map abs* ts))]
+      [(TCut: sy t u) (mk-TCut sy (abs* t) (abs* u))]
+      [(TVariant: sy name ts tr) (mk-TVariant sy name (map abs* ts) tr)]
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
+      [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
+      [_ (error 'abstract-free "Bad type ~a" t)])))
+
 (define (abstract-free t name [taddr* #f])
-  (Scope
-   (let abs ([t t] [i 0])
-     (define (abs* t) (abs t i))
-     (match t
-       [(TFree: sy x taddr)
-        (if (equal? x name)
-            (mk-TBound sy i (cond
-                             [(eq? taddr 'trusted) #f] ;; 'trusted has behavior of #f when closed.
-                             [taddr] ;; return self
-                             ;; override typing if there isn't already one.
-                             [else (and (not (eq? taddr* 'trusted)) taddr*)]))
-            t)]
-       [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (abs t (add1 i))) tr n)]
-       [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
-       ;; boilerplate
-       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TUnif?) (? TError?)) t]
-       [(TSUnion: sy ts) (mk-TSUnion sy (map abs* ts))]
-       [(TRUnion: sy ts) (mk-TRUnion sy (map abs* ts))]
-       [(TCut: sy t u) (mk-TCut sy (abs* t) (abs* u))]
-       [(TVariant: sy name ts tr) (mk-TVariant sy name (map abs* ts) tr)]
-       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
-       [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
-       [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
-       [_ (error 'abstract-free "Bad type ~a" t)]))))
+  (Scope (abstract-free-aux t 0 name taddr*)))
 
 ;; Remove mutable unification variables.
 (define (freeze t)
@@ -357,7 +362,7 @@
           (match t
             [(or (TSUnion: _ ts) (TRUnion: _ ts))
              (andmap ((curry coind) A) ts)]
-            [(or (TMap: _ d r _) (TCut: _ d r))
+            [(TMap: _ d r _)
              (and (coind A d) (coind A r))]
             [(TVariant: _ _ ts _)
              (let all ([A A] [ts ts])
@@ -368,12 +373,11 @@
                   (and A* (all A* ts))]))]
             [(or (Tμ: _ _ (Scope t) _ _)  (TSet: _ t _))
              (coind A t)]
-            [(? TΛ?) #f]
-            [(TName: _ x _)
-             (if (set-member? A x) ;; already looked up name and haven't failed yet.
+            [(or (? TΛ?) (? TFree?)) #f]
+            [(? needs-resolve?)
+             (if (set-member? A t) ;; already looked up name and haven't failed yet.
                  A
-                 (coind (set-add A x)
-                        (hash-ref (Language-user-spaces (current-language)) x)))]
+                 (coind (set-add A t) (resolve t)))]
             [_ A])]
          [else (and m A)])))
     (set-Type-mono?! t b)
@@ -571,7 +575,6 @@
             (hash-set! us x* T⊥)
             (define τσ (⊔ (hash-ref us x) σ (hash-set ρ x x*)))
             (hash-set! us x* τσ)
-            (printf "⊔: New named space ~a: ~a" x* τσ)
             τσ]
         [y (⊔ (mk-TName y taddr) σ ρ)]))
     (define (unify τ σ)
@@ -649,13 +652,11 @@
     (define (meet-named x taddr σ)
       (match (hash-ref ρ x #f)
         [#f (define x* (gensym x))
-            (printf "New named space ~a from ~a~%" x* x)
             (hash-set! us x* T⊥)
             (define τσ (⊓ (hash-ref us x) σ (hash-set ρ x x*)))
             (hash-set! us x* τσ)
             τσ]
         [y
-         (printf "⊓: Translated name: ~a~%" y)
          (⊓ (mk-TName #f y taddr) σ ρ)]))
     (define (unify τ σ)
       (define out (⊓ (TUnif-τ τ) σ ρ))

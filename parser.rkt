@@ -153,12 +153,10 @@ single address space
   #:attributes (t)
   #:local-conventions ([#rx"^t" (PreType trust Unames Enames meta-table)])
   (pattern ((~or #:Λ #:∀ #:all) f:formals tbody)
-           #:attr t (let ([q (quantify-frees (attribute tbody.t)
-                                             (reverse (attribute f.xs))
-                                             #:stxs (attribute f.ids)
-                                             #:taddrs (attribute f.taddrs))])
-                      (printf "Quantified ~a~%" q)
-                      q))
+           #:attr t (quantify-frees (attribute tbody.t)
+                                    (reverse (attribute f.xs))
+                                    #:stxs (attribute f.ids)
+                                    #:taddrs (attribute f.taddrs)))
   (pattern (~and sy
                  (#:μ x:id (~var ty:expr) u:Unrolling
                       (~parse (~var tbody (PreType (attribute u.trust)
@@ -753,11 +751,14 @@ Turn all free non-metavariables into external space names if they are bound.
                 ... (~or (~datum ->) (~datum →))
                 (~var ret (TopPreType unames enames meta-table))))
               (~var r (Rule-cls #f L)) ...)
+     (define type-names (rev-map syntax-e (attribute ta)))
      ;; TODO: check that rules' patterns match (name args ...) for the type of name.
      (Metafunction (syntax-e #'name)
                    (quantify-frees
                     (mk-TArrow #'(arrty ...)
                      (mk-TVariant #'(formals ...) (syntax-e #'name) (attribute formals.t) 'untrusted)
                      (attribute ret.t))
-                    (rev-map syntax-e (attribute ta)))
-                   (attribute r))]))
+                    type-names)
+                   ;; There will be as many scopes on the rules as type quants
+                   ;; in the mf type.
+                   (abstract-frees-in-rules (attribute r.rule) type-names))]))

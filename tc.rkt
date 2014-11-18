@@ -8,6 +8,8 @@
          tc-pattern
          tc-term
          tc-rules
+         tc-language
+         tc-metafunctions
          report-all-errors)
 
 ;; TODO: syntax location tracking and reporting
@@ -53,7 +55,12 @@
       [else (type-error "Expect ~a to be a subtype of ~a" τ σ)])]
     [_
      (cond
-      [(implies expect (<:? τ expect)) (Check τ)]
+      [(implies expect (<:? τ expect))
+       ;; No annotation but an expectation of a named type means
+       ;; we must adopt the named type to ensure the proper heap-allocation.
+       (if (TName? expect)
+           (Check expect)
+           (Check τ))]
       [else (type-error "(C ~a) Expected ~a, got ~a" ct expect τ)])]))
 
 (define (coerce-check-overlap ct expect-overlap τ)
@@ -103,7 +110,8 @@
        (values Γ
                (Update sy
                        (replace-ct
-                        (type-error "Expect store lookup key to have an address type, got ~a" (πcc k*))
+                        (type-error "Expect store lookup key to have an address type, got ~a"
+                                    (πcc k*))
                         k*)
                        (tc-expr* v)))])]
     [(Where sy pat e)
@@ -132,7 +140,14 @@
                                   (mk-TVariant #f 'bar (list T⊤) 'untrusted))))))
 
 (define (tc-term Γ Ξ t expect-overlap)
-  (error 'tc-term "todo"))
+  (define ct (Typed-ct t))
+  (define (chk pre-τ) (coerce-check-overlap ct expect-overlap pre-τ))
+  (match t
+    [(Variant sy _ n ts) (error 'tc-term "Check variant")]
+    [(Map sy _ f) (error 'tc-term "Check map")]
+    [(Set sy _ s) (error 'tc-term "Check set")]
+    [(External sy _ v) (error 'tc-term "Check external")]
+    [_ (error 'tc-term "Unsupported term ~a" t)]))
 
 ;; expect-overlap is a type or a list of types (no expectations should be T⊤)
 (define (tc-pattern Γ Ξ pat expect-overlap)
@@ -285,6 +300,7 @@
           (type-error "Expect ~a to have ~a type, got ~a" form ty σ)))
     (match e
       [(ECall sy _ mf τs es)
+       ;; We monomorphize as well as check the function.
        (define mfτ (hash-ref Ξ mf (unbound-mf sy 'tc-expr mf)))
        ;; instantiate with all given types, error if too many
        (define inst (repeat-inst mfτ τs))
@@ -307,7 +323,30 @@
          (for/list ([se (in-list es)]
                     [σ (in-list dom-σs)])
            (tc-expr* se σ)))
-       (ECall sy (chk rng) mf τs es*)]
+       (define H (monomorphized))
+       (define renamed
+         (cond
+          [(and H (andmap mono-type? dom-σs) (mono-type? rng))
+           ;; TODO: recheck whole mf body to get the instantiations.
+           (define mf-mono (hash-ref! H mf make-hash))
+           (define name* ((mono-namer) mf τs))
+           (unless (hash-has-key? mf-mono name*)
+             (hash-set! mf-mono name* 'gray) ;; don't diverge with self-calls
+             (hash-set!
+              mf-mono name*
+              (Metafunction name* inst
+                            (tc-rules #hash() Ξ
+                                      ;; instantiate the mono-types in the mf body.
+                                      (open-scopes-in-rules
+                                       (Metafunction-rules (hash-ref (mf-defs) mf))
+                                       (reverse τs)) ;; Outermost first.
+                                      (TArrow-dom inst)
+                                      rng))))
+           name*]
+          [else #f]))
+       (if renamed ;; monomorphized
+           (ECall sy (chk rng) renamed '() es*)
+           (ECall sy (chk rng) mf τs es*))]
 
       [(EVariant sy _ n tag τs es)
        ;; Find all the n-named variants and find which makes sense.
@@ -341,6 +380,7 @@
          (or found
              (EVariant sy (type-error "No variant type matched")
                        n tag τs (for/list ([e (in-list es)]) (tc-expr* e T⊤)))))
+       ;; XXX: type-meet does unification!
        (if expected
            (match (resolve (type-meet expected generic))
              [(TVariant: _ _ σs tr) (do σs tr)]
@@ -427,6 +467,44 @@
       [(EMap-remove sy _ m k) (error 'tc-expr "Todo: map-remove")]
       [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
   (tc-expr* e expected))
+
+;; Map a name to a map of types to metafunction definitions.
+;; This separates all metafunctions out into their appropriate monomorphizations.
+;; The naming scheme for the monomorphizations is based on ???
+(define monomorphized (make-parameter #f))
+(define mf-defs (make-parameter #f))
+(define mono-namer (make-parameter #f))
+
+(define (tc-language rules metafunctions state-τ
+                     #:use-lang [lang (current-language)]
+                     #:mono-naming [namer (λ (name type)
+                                             (string->symbol (format "~a~a" name type)))])
+  ;; To resolve mf name to type while typechecking.
+  (define Ξ
+    (for/hash ([mf (in-list metafunctions)])
+      (match-define (Metafunction name τ _) mf)
+      (values name τ)))
+  ;; Get the checked, general forms of the metafunctions
+  (define mfs* (tc-metafunctions metafunctions Ξ))
+  (parameterize ([monomorphized (make-hash)]
+                 [mf-defs (for/hash ([mf (in-list mfs*)])
+                            (values (Metafunction-name mf) mf))]
+                 [mono-namer namer])
+    ;; with monomorphized set to a hash, tc-metafunctions will create the
+    ;; monomorphized versions of the monomorphic instantiations in the
+    ;; metafunction definitions themselves.
+    (tc-metafunctions mfs* Ξ)
+    ;; When checking the rules, all ecalls will additionally populate monomorphized
+    (values (tc-rules #hash() Ξ rules state-τ state-τ)
+            (append-map hash-values (hash-values (monomorphized))))))
+
+;; Typecheck all metafunctions
+(define (tc-metafunctions mfs Ξ)
+  (for/list ([mf (in-list mfs)])
+    (match-define (Metafunction name τ scoped-rules) mf)
+    (match-define-values (names (TArrow: _ dom rng) rules) (open-type-and-rules τ scoped-rules))
+    (define rules* (tc-rules #hash() Ξ rules dom rng))
+    (Metafunction name τ (abstract-frees-in-rules rules* names))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Error reporting

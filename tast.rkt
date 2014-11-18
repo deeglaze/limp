@@ -99,7 +99,7 @@ and semantics.
 (struct PIsAddr Pattern () #:transparent)
 (struct PIsType Pattern () #:transparent)
 #|
-Template:
+pattern template:
  (match pat
     [(PAnd sy ct ps) ???]
     [(PName sy ct x) ???]
@@ -212,7 +212,7 @@ Template:
 (struct External Term (v) #:transparent)
 
 #|
-template
+term template
  (match t
     [(Variant sy ct n ts) ???]
     [(Map sy ct f) ???]
@@ -301,7 +301,7 @@ template
 (struct EMap-has-key Expression (m k) #:transparent)
 (struct EMap-remove Expression (m k) #:transparent)
 #|
-Template
+expr template
  (match e
     [(ECall sy ct mf τs es) ???]
     [(EVariant sy ct n tag τs es) ???]
@@ -320,7 +320,7 @@ Template
     [(EMap-lookup sy ct m k) ???]
     [(EMap-has-key sy ct m k) ???]
     [(EMap-remove sy ct m k) ???]
-    [_ (error 'tc-expr "Unrecognized expression form: ~a" e)])
+    [_ (error who "Unrecognized expression form: ~a" e)])
 |#
 
 (define (expr-α-equal? e0 e1 [ρ0 #hasheq()] [ρ1 #hasheq()])
@@ -444,3 +444,227 @@ Template
 (struct Rule with-stx (name lhs rhs bus) #:transparent
         #:methods gen:custom-write [(define write-proc write-rule)])
 
+(define (abstract-frees-in-rules rules names)
+  (for/fold ([scoped-rules (abstract-frees-in-rules-aux rules names)])
+      ([? (in-list names)])
+    (Scope scoped-rules)))
+
+(define (open-scopes-in-rules scoped-rules substs)
+  (let match-open ([sr scoped-rules] [substs* substs])
+    (match* (sr substs*)
+      [((Scope sr) (cons _ substs*))
+       (match-open sr substs*)]
+      [((not (? Scope?)) '())
+       (open-scopes-in-rules-aux sr substs)]
+      [(_ _)
+       (error 'open-scopes-in-rules "Scope subst mismatch ~a, ~a" scoped-rules substs)])))
+
+(define (abstract-frees-in-rules-aux rules names)
+  (for/list ([rule (in-list rules)])
+    (abstract-frees-in-rule rule names)))
+
+(define (open-scopes-in-rules-aux rules substs)
+  (for/list ([rule (in-list rules)])
+    (open-scopes-in-rule rule substs)))
+
+(define (abstract-frees-in-rule rule names)
+  (match-define (Rule sy name lhs rhs bus) rule)
+  (define lhs* (abstract-frees-in-pattern lhs names))
+  (define rhs* (abstract-frees-in-expr rhs names))
+  (define bus* (abstract-frees-in-bus bus names))
+  (Rule sy name lhs* rhs* bus*))
+
+(define (open-scopes-in-rule rule substs)
+  (match-define (Rule sy name lhs rhs bus) rule)
+  (define lhs* (open-scopes-in-pattern lhs substs))
+  (define rhs* (open-scopes-in-expr rhs substs))
+  (define bus* (open-scopes-in-bus bus substs))
+  (Rule sy name lhs* rhs* bus*))
+
+(define (abstract-frees-in-bus bus names)
+  (for/list ([bu (in-list bus)]) (abstract-frees-in-bu bu names)))
+
+(define (open-scopes-in-bus bus substs)
+  (for/list ([bu (in-list bus)]) (open-scopes-in-bu bu substs)))
+
+(define (abstract-frees-in-bu bu names)
+  (match bu
+    [(Update sy k v)
+     (Update sy
+             (abstract-frees-in-expr k names)
+             (abstract-frees-in-expr v names))]
+    [(Where sy pat e)
+     (Where sy
+            (abstract-frees-in-pattern pat names)
+            (abstract-frees-in-expr e names))]))
+
+(define (open-scopes-in-bu bu substs)
+  (match bu
+    [(Update sy k v)
+     (Update sy
+             (open-scopes-in-expr k substs)
+             (open-scopes-in-expr v substs))]
+    [(Where sy pat e)
+     (Where sy
+            (open-scopes-in-pattern pat substs)
+            (open-scopes-in-expr e substs))]))
+
+(define (abstract-frees-in-ct ct names)
+  (match ct
+    [(Cast τ) (Cast (abstract-frees τ names))]
+    [(Check τ) (Check (abstract-frees τ names))]
+    [_ ct]))
+
+(define (open-scopes-in-ct ct substs)
+  (match ct
+    [(Cast τ) (Cast (open-scopes τ substs))]
+    [(Check τ) (Check (open-scopes τ substs))]
+    [_ ct]))
+
+(define (peel-scopes s)
+  (match s
+    [(Scope st) (peel-scopes st)]
+    [_ s]))
+
+(define (abstract-frees-in-pattern pat names)
+  (let self ([pat pat])
+    (define ct* (abstract-frees-in-ct (Typed-ct pat) names))
+    (match pat
+      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
+      [(PName sy _ x) (PName sy ct* x)]
+      [(PWild sy ct) (PWild sy ct*)]
+      [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
+      [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
+      [(PMap-with* sy _ k v p) (PMap-with* sy ct* (self k) (self v) (self p))]
+      [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
+      [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
+      [(PTerm sy _ t) (PTerm sy ct* (abstract-frees-in-term t names))]
+      [(PIsExternal sy _) (PIsExternal sy ct*)]
+      [(PIsAddr sy _) (PIsAddr sy ct*)]
+      [(PIsType sy _) (PIsType sy ct*)]
+      [_ (error 'abstract-frees-in-pattern "Unsupported pattern: ~a" pat)])))
+
+(define (open-scopes-in-pattern pat substs)
+  (let self ([pat pat])
+    (define ct* (open-scopes-in-ct (Typed-ct pat) substs))
+    (match pat
+      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
+      [(PName sy _ x) (PName sy ct* x)]
+      [(PWild sy ct) (PWild sy ct*)]
+      [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
+      [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
+      [(PMap-with* sy _ k v p) (PMap-with* sy ct* (self k) (self v) (self p))]
+      [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
+      [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
+      [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t names))]
+      [(PIsExternal sy _) (PIsExternal sy ct*)]
+      [(PIsAddr sy _) (PIsAddr sy ct*)]
+      [(PIsType sy _) (PIsType sy ct*)]
+      [_ (error 'open-scopes-in-pattern "Unsupported pattern: ~a" pat)])))
+
+(define (abstract-frees τ names)
+  (for/fold ([abs-τ τ])
+      ([name (in-list names)]
+       [i (in-naturals)])
+    (abstract-free-aux abs-τ i name #f)))
+
+(define (abstract-freess τs names)
+  (for/list ([τ (in-list τs)]) (abstract-frees τ names)))
+
+(define (open-scopes τ substs)
+  (for/fold ([open-τ τ])
+      ([sub (in-list substs)]
+       [i (in-naturals)])
+    (open-scope-aux open-τ i sub)))
+
+(define (open-scopess τs substs)
+  (for/list ([τ (in-list τs)]) (open-scopes τ substs)))
+
+(define (abstract-frees-in-expr e names)
+  (let self ([e e])
+    (define ct* (abstract-frees-in-ct (Typed-ct e) names))
+    (match e
+      [(ECall sy _ mf τs es)
+       (ECall sy ct* mf
+              (abstract-freess τs names)
+              (map self es))]
+      [(EVariant sy _ n tag τs es)
+       (EVariant sy ct* n tag (abstract-freess τs names) (map self es))]
+      [(ERef sy _ x) (ERef sy ct* x)]
+      [(EStore-lookup sy _ k lm) (EStore-lookup sy ct* (self k) lm)]
+      [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
+      [(ELet sy _ bus body) (ELet sy ct* (abstract-frees-in-bus bus names) (self body))]
+      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (abstract-frees-in-rules-aux rules names))]
+      [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
+      [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
+      [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
+      [(ESet-union sy _ es) (ESet-union sy ct* (map self es))]
+      [(ESet-intersection sy _ e es) (ESet-intersection sy ct* (self e) (map self es))]
+      [(ESet-subtract sy _ e es) (ESet-subtract sy ct* (self e) (map self es))]
+      [(ESet-member sy _ e v) (ESet-member sy ct* (self e) (self v))]
+      [(EMap-lookup sy _ m k) (EMap-lookup sy ct* (self m) (self k))]
+      [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
+      [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
+      [_ (error 'abstract-frees-in-expr "Unrecognized expression form: ~a" e)])))
+
+(define (open-scopes-in-expr e substs)
+  (let self ([e e])
+    (define ct* (open-scopes-in-ct (Typed-ct e) substs))
+    (match e
+      [(ECall sy _ mf τs es)
+       (ECall sy ct* mf
+              (open-scopess τs substs)
+              (map self es))]
+      [(EVariant sy _ n tag τs es)
+       (EVariant sy ct* n tag (open-scopess τs names) (map self es))]
+      [(ERef sy _ x) (ERef sy ct* x)]
+      [(EStore-lookup sy _ k lm) (EStore-lookup sy ct* (self k) lm)]
+      [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
+      [(ELet sy _ bus body) (ELet sy ct* (open-scopes-in-bus bus names) (self body))]
+      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (open-scopes-in-rules-aux rules names))]
+      [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
+      [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
+      [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
+      [(ESet-union sy _ es) (ESet-union sy ct* (map self es))]
+      [(ESet-intersection sy _ e es) (ESet-intersection sy ct* (self e) (map self es))]
+      [(ESet-subtract sy _ e es) (ESet-subtract sy ct* (self e) (map self es))]
+      [(ESet-member sy _ e v) (ESet-member sy ct* (self e) (self v))]
+      [(EMap-lookup sy _ m k) (EMap-lookup sy ct* (self m) (self k))]
+      [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
+      [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
+      [_ (error 'open-scopes-in-expr "Unrecognized expression form: ~a" e)])))
+
+(define (abstract-frees-in-term t names)
+  (let self ([t t])
+    (define ct* (abstract-frees-in-ct (Typed-ct t) names))
+    (match t
+      [(Variant sy _ n ts) (Variant sy ct* n (map self ts))]
+      [(Map sy _ f) (Map sy ct* (for/hash ([(k v) (in-hash f)])
+                                  (values (self k) (self v))))]
+      [(Set sy _ s) (Set sy ct* (for/set ([v (in-set s)]) (self v)))]
+      [(External sy _ v) (External sy ct* v)]
+      [_ (error 'abstract-frees-in-term "Unsupported term ~a" t)])))
+
+(define (open-scopes-in-term t substs)
+  (let self ([t t])
+    (define ct* (open-scopes-in-ct (Typed-ct t) substs))
+    (match t
+      [(Variant sy _ n ts) (Variant sy ct* n (map self ts))]
+      [(Map sy _ f) (Map sy ct* (for/hash ([(k v) (in-hash f)])
+                                  (values (self k) (self v))))]
+      [(Set sy _ s) (Set sy ct* (for/set ([v (in-set s)]) (self v)))]
+      [(External sy _ v) (External sy ct* v)]
+      [_ (error 'abstract-frees-in-term "Unsupported term ~a" t)])))
+
+(define (open-type-and-rules τ scoped-rules)
+  (define (err)
+    (error 'open-type-and-rules
+             "Scope mismatch between type and rules ~a and ~a"
+             τ scoped-rules))
+  (let open ([τ τ] [names '()] [tvs '()])
+   (match τ
+     [(TΛ: _ name s)
+      (define name* (gensym name))
+      (define tv (mk-TFree #f name* #f))
+      (open (open-scope s tv) (cons name* names) (cons tv tvs))]
+     [_ (values names τ (open-scopes-in-rules scoped-rules tvs))])))

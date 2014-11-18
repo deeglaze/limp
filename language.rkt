@@ -22,6 +22,11 @@
 (struct Reduction-relation (rules τ) #:prefab)
 (struct Metafunction (name τ rules) #:prefab)
 
+(define (mkΞ metafunctions)
+  (for/hash ([m (in-list metafunctions)])
+    (values (Metafunction-name m)
+            (Metafunction-τ m))))
+
 ;; External descriptor
 (struct ED (⊔ ⊑ ≡ μ touch quality pretty parse))
 

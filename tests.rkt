@@ -1,5 +1,6 @@
 #lang racket/base
-(require racket/match
+(require racket/list
+         racket/match
          racket/pretty
          racket/sandbox
          racket/set
@@ -47,9 +48,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-(type-print-verbosity 2)
-(pattern-print-verbosity 3)
-(expr-print-verbosity 3)
+;(type-print-verbosity 2)
+;(pattern-print-verbosity 3)
+;(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -135,11 +136,12 @@
 
   (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
   (define CEK* (tc-rules #hash() #hash() CEK Sτ Sτ))
+
   (pretty-print CEK*)
 
   (report-all-errors CEK*)
 
-  (language->mkV CEK* void))
+  (language->mkV CEK* '() void))
 
 (parameterize ([current-language
                 (parse-language
@@ -160,12 +162,8 @@
                            (ap xs Expr Env Values Kont)]))])
 
   (check-true
-   (let ([us (Language-user-spaces (current-language))])
-     (for/or ([t (in-set (hash-ref (recursive-nonrecursive (apply set (hash-values us)))
-                                   (hash-ref us 'TList) ∅))]
-              #:when (TName? t))
-       (eq? (TName-x t) 'TList)))
-   "TList is recursive")
+   (self-referential? (resolve (parse-type #'(#:inst TList Value) #:use-lang? #t)))
+   "TList[Value] is recursive")
 
  (define CESK
    (parse-reduction-relation #'([#:--> (ev (app e0 es) ρ κ)
@@ -203,11 +201,16 @@
                 [(extend* ρ (Nil) (Nil)) ρ]
                 [(extend* ρ (TCons a as) (TCons b bs))
                  (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)]))))
- (define Ξ (for/hash ([m (in-list metafunctions)])
-             (values (Metafunction-name m)
-                     (Metafunction-τ m))))
- (define CESK* (tc-rules #hash() Ξ CESK Sτ Sτ))
- (report-all-errors CESK*)
 
- (language->mkV CESK* void)
-))
+ 
+ (define-values (CESK* metafunctions*)
+   (tc-language CESK metafunctions Sτ))
+
+ (pretty-print CESK*)
+ (pretty-print metafunctions*)
+
+ (report-all-errors
+  (append (append-map (compose peel-scopes Metafunction-rules) metafunctions*)
+          CESK*))
+
+ (language->mkV CESK* metafunctions* void)))
