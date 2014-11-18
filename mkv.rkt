@@ -3,7 +3,6 @@
          "language.rkt"
          "tast.rkt"
          "types.rkt"
-         graph
          racket/list
          racket/match
          racket/pretty
@@ -86,8 +85,8 @@ without an intervening variant constructor.
                 [(TΛ: _ x st) #f] ;; XXX: Must be instantiated to be a problem?
                 [(or (TSUnion: _ ts) (TRUnion: _ ts)) (ormap rec ts)]
                 [(? needs-resolve?) (rec (resolve t))]
-                [(? TFree?) #f] ;; only from metafunctions, which will be instantiated later.
-                [(? TBound?) (error 'self-referential? "We shouldn't see names here ~a" t*)]
+                [(or (? TBound?) (? TFree?))
+                 (error 'self-referential? "We shouldn't see names here ~a" t*)]
                 [_ (error 'type->edges "Bad type ~a" t)])])))
         (hash-set! self-referential t b)
         b)))
@@ -113,7 +112,8 @@ without an intervening variant constructor.
   (and (TAddr? τ) (TAddr-implicit? τ)))
 
 (define (heap-allocate? σ)
-  (or (and (TName? σ) (TName-taddr σ))
+  (or (and (TName? σ)
+           (implicit-translation? (TName-taddr σ)))
       (and (self-referential? σ)
            (not (externalized? σ)))))
 
