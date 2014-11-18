@@ -29,10 +29,10 @@
 
  ;; (foo a (List a))
  (define foo-a-list-a
-   (mk-TVariant #f 'foo (list (mk-TFree #f 'a #f) 
+   (mk-TVariant #f 'foo (list (mk-TFree #f 'a) 
                               (mk-TCut #f
-                                       (mk-TName #f 'List #f)
-                                       (mk-TFree #f 'a #f)))
+                                       (mk-TName #f 'List)
+                                       (mk-TFree #f 'a)))
                 'untrusted))
 
  (check-equal? foo-a-list-a
@@ -40,7 +40,7 @@
 
  ;; (foo x y)
  (define foo-x-y
-   (mk-TVariant #f 'foo (list (mk-TFree #f 'x #f) (mk-TFree #f 'y #f)) 'untrusted))
+   (mk-TVariant #f 'foo (list (mk-TFree #f 'x) (mk-TFree #f 'y)) 'untrusted))
 
  (check-equal? foo-x-y (parse-type #'(foo x y)))
 

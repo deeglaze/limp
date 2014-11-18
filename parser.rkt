@@ -90,13 +90,17 @@ single address space
 (define (->ref x Unames Enames meta-table taddr)
   (let* ([sym (syntax-e x)]
          [sym (hash-ref meta-table sym sym)])
-    (cond
-     [(set-member? Unames sym)
-      (mk-TName x sym taddr)]
-     [(set-member? Enames sym)
-      (mk-TExternal x sym taddr)]
-     [else
-      (mk-TFree x sym taddr)])))
+    (define τ
+      (cond
+       [(set-member? Unames sym)
+        (mk-TName x sym)]
+       [(set-member? Enames sym)
+        (mk-TExternal x sym)]
+       [else
+        (mk-TFree x sym)]))
+    (if taddr
+        (THeap taddr τ)
+        τ)))
 
 (define-splicing-syntax-class formal-splicing
   #:attributes (id x taddr)
@@ -118,9 +122,7 @@ single address space
                                  (or (attribute modes.mm)
                                      limp-default-mm) 
                                  (or (attribute modes.em)
-                                     limp-default-em)
-                                 ;; will be an implicit address.
-                                 #t)))))
+                                     limp-default-em))))))
 
 (define-syntax-class formal
   #:attributes (id x taddr)
@@ -315,8 +317,7 @@ single address space
                                    (Cast
                                     (mk-TAddr #'modes (syntax-e #'name)
                                               (attribute modes.mm)
-                                              (attribute modes.em)
-                                              #f)))))
+                                              (attribute modes.em))))))
   (pattern (~and sy ((~var _ (pexternal L)) name:id))
            #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
            #:attr pat (PIsExternal #'sy
@@ -404,8 +405,7 @@ single address space
                                 (Check (mk-TAddr #'ops
                                                  (attribute ops.space)
                                                  (attribute ops.mm)
-                                                 (attribute ops.em)
-                                                 #f)))
+                                                 (attribute ops.em))))
                             (attribute ops.tag)))
   (pattern (~and sy (#:let [(~var bus (Binding-updates-cls L))] ebody))
            #:attr e (ELet #'sy

@@ -94,7 +94,7 @@ without an intervening variant constructor.
 ;; Can't resolve through a heap-allocation
 (define (externalized? τ)
   (match τ
-    [(and (? needs-resolve?) (not (TName: _ _ (not #f))))
+    [(and (not (? THeap?)) (? needs-resolve?))
      (externalized? (resolve τ))]
     [(or (TMap: _ _ _ #t) (TSet: _ _ #t)) #t]
     [_ #f]))
@@ -108,12 +108,8 @@ without an intervening variant constructor.
      (populate-expr-rules vh eh `(where-rhs . ,path) e)]
     [_ (error 'populate-bu-rules "Bad bu ~a" bu)]))
 
-(define (implicit-translation? τ)
-  (and (TAddr? τ) (TAddr-implicit? τ)))
-
 (define (heap-allocate? σ)
-  (or (and (TName? σ)
-           (implicit-translation? (TName-taddr σ)))
+  (or (THeap? σ)
       (and (self-referential? σ)
            (not (externalized? σ)))))
 

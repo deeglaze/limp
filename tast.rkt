@@ -54,8 +54,8 @@ and semantics.
         [(PSet-with* _ _ v p) `(#:set-with* ,(rec v)
                                             ,(rec p))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
-        [(PIsExternal _ (Cast (TExternal: _ name _))) `(#:is-external ,name)]
-        [(PIsAddr _ (Cast (TAddr: _ space mm em _))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
+        [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
+        [(PIsAddr _ (Cast (TAddr: _ space mm em))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
         [(PIsType _ (Cast τ)) `(#:is-type FUCK)] ;; printer will handle τ
         [_ `(error$ ,(format "Unsupported pattern: ~a" (struct->vector p)))]))
     (case v
@@ -169,7 +169,7 @@ pattern template:
     [(Set sy ct s) (for/fold ([t '#:empty-set])
                     ([v (in-set s)])
                   `(#:add ,t ,(term->sexp v)))]
-    [(External _ (Check (TExternal: _ name _)) v) `(#:external ,name ,v)]
+    [(External _ (Check (TExternal: _ name)) v) `(#:external ,name ,v)]
     [_ `(error$ ,(format "Unsupported term ~a" t))]))
 
 (define (term-replace-ct ct t)
@@ -231,7 +231,7 @@ term template
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
         [(EStore-lookup _ _ k lm) `(#:lookup ,(rec k) ,(s->k lm))]
-        [(EAlloc _ (Check (TAddr: _ space mm em _)) tag)
+        [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
          `(#:alloc ,@(do-tag tag) ,space ,(s->k mm) ,(s->k em))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
         [(EMatch _ _ de rules) `(#:match ,(rec de) . ,(map (rule->sexp #f) rules))]
@@ -665,6 +665,6 @@ expr template
    (match τ
      [(TΛ: _ name s)
       (define name* (gensym name))
-      (define tv (mk-TFree #f name* #f))
+      (define tv (mk-TFree #f name*))
       (open (open-scope s tv) (cons name* names) (cons tv tvs))]
      [_ (values names τ (open-scopes-in-rules scoped-rules tvs))])))
