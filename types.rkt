@@ -77,9 +77,10 @@
           ;; Non-types
           [(TUnif τ) `(Unif$ ,(rec τ))]
           [(TError msgs) `(Error . ,msgs)]
-          [(THeap: _ taddr τ)
+          [(THeap: _ taddr tag τ)
            (if (> v 1)
                `(#:heapify ,(if (symbol? taddr) taddr (rec taddr))
+                           ,tag
                            ,(rec τ))
                (rec τ))]
           [#f '_] ;; Missing type
@@ -138,8 +139,8 @@
 (struct Scope (t) #:transparent)
 (define-type TFree (x))
 (define-type TBound (i))
-;; Marked to be heap-allocated when transformed
-(define-type THeap (taddr τ))
+;; Marked to be heap-allocated when transformed.
+(define-type THeap (taddr tag τ))
 ;; Unification variable
 (struct TUnif ([τ #:mutable])
         #:methods gen:custom-write [(define write-proc write-type)])
@@ -193,12 +194,12 @@
 
 ;; If we substituted in a heap allocation under a heap allocation,
 ;; duplicate the type with different allocation tags if they are indeed different.
-(define (combine-THeap sy taddr σ)
+(define (combine-THeap sy taddr tag σ)
   (match σ
-    [(THeap: _ taddr* τ*)
-     (type-join (mk-THeap sy taddr τ*)
-                (mk-THeap sy taddr* τ*))]
-    [τ* (mk-THeap sy taddr τ*)]))
+    [(THeap: _ taddr* tag* τ*)
+     (type-join (mk-THeap sy tag taddr τ*)
+                (mk-THeap sy tag taddr* τ*))]
+    [τ* (mk-THeap sy taddr tag τ*)]))
 
 (define (open-scope-aux t* i t)
   (let open ([t* t*] [i i])
@@ -215,7 +216,7 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
-      [(THeap: sy taddr τ) (combine-THeap sy taddr (open* τ))]
+      [(THeap: sy taddr tag τ) (combine-THeap sy taddr tag (open* τ))]
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
       [(TUnif τ) (open* τ)]
@@ -262,7 +263,7 @@
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
       [(TUnif τ) (open* τ)]
-      [(THeap: sy taddr τ) (mk-THeap sy taddr (open* τ))]
+      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (open* τ))]
       [_ (error 'open "Bad type ~a" t*)])))
  
 (define (subst-name t name s)
@@ -283,7 +284,7 @@
       [(TCut: sy t u) (mk-TCut sy (subst t) (subst u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (subst t-dom) (subst t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (subst t) ext)]
-      [(THeap: sy taddr τ) (combine-THeap sy taddr (subst τ))]
+      [(THeap: sy taddr tag τ) (combine-THeap sy taddr tag (subst τ))]
       [_ (error 'subst-name "Bad type ~a" t)])))
 
 (define (abstract-free-aux t i name taddr*)
@@ -311,7 +312,7 @@
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
       [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
-      [(THeap: sy taddr τ) (mk-THeap sy taddr (abs* τ))]
+      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (abs* τ))]
       [_ (error 'abstract-free "Bad type ~a" t)])))
 
 (define (abstract-free t name [taddr* #f])
@@ -332,7 +333,7 @@
     [(TVariant: sy name ts tr) (*TVariant sy name (map freeze ts) tr)]
     [(TMap: sy t-dom t-rng ext) (mk-TMap sy (freeze t-dom) (freeze t-rng) ext)]
     [(TSet: sy t ext) (mk-TSet sy (freeze t) ext)]
-    [(THeap: sy taddr τ) (mk-THeap sy taddr (freeze τ))]
+    [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (freeze τ))]
     [_ (error 'freeze "Bad type ~a" t)]))
 
 (define ff (cons #f #f))
@@ -358,7 +359,7 @@
                   [(or (TSUnion: _ ts) (TRUnion: _ ts) (TVariant: _ _ ts _)
                        (app (match-lambda [(or (TMap: _ d r _) (TCut: _ d r)) (list d r)] [_ '()]) ts)
                        (app (match-lambda [(TSet: _ s _) (list s)] [_ '()]) ts)
-                       (app (match-lambda [(THeap: _ _ τ) (list τ)] [_ '()]) ts))
+                       (app (match-lambda [(THeap: _ _ _ τ) (list τ)] [_ '()]) ts))
                    (for/union ([t (in-list ts)]) (support t))]
                   [(or (TFree: _ x) (TName: _ x)) (seteq x)]
                   [(or (Tμ: _ x (Scope t) _ _) (TΛ: _ x (Scope t)))
@@ -379,7 +380,7 @@
                   [(or (Tμ: _ _ (Scope t) _ _)
                        (TΛ: _ _ (Scope t))
                        (TSet: _ t _)
-                       (THeap: _ _ t))
+                       (THeap: _ _ _ t))
                    (free t)]
                   [_ ∅eq])])
         (set-Type-free! t t*)
@@ -396,7 +397,7 @@
     [(or (Tμ: _ _ (Scope t) _ _)
          (TΛ: _ _ (Scope t))
          (TSet: _ t _)
-         (THeap: _ _ t))
+         (THeap: _ _ _ t))
      (names t)]
     [_ ∅eq]))
 
@@ -428,7 +429,7 @@
              (if (set-member? A t) ;; already looked up name and haven't failed yet.
                  A
                  (coind (set-add A t) (resolve t)))]
-            [(THeap: _ _ τ) (coind A τ)]
+            [(THeap: _ _ _ τ) (coind A τ)]
             [_ A])]
          [else (and m A)])))
     (set-Type-mono?! t b)
@@ -554,7 +555,7 @@
                 (reset (open-scope st u))]
                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
             [(TUnif τ) (reset τ)]
-            [(THeap: sy taddr τ) (mk-THeap sy taddr (reset τ))]
+            [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (reset τ))]
             [_ t])
           (error 'resolve "Circular reference: ~a" orig)))))
 
@@ -614,7 +615,7 @@
          (<:?-aux (grow-A) τ (resolve σ ρ))]
         ;; XXX: (NO?) Heap annotations are not directional for subtyping
         ;[((THeap: _ _ τ) σ) (<:?-aux A τ σ)]
-        [(τ (THeap: _ _ σ)) (<:?-aux A τ σ)]
+        [(τ (THeap: _ _ _ σ)) (<:?-aux A τ σ)]
         [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
          (and (for/and ([t (in-list ts)])
                 (<:?-aux A t σ))
@@ -715,16 +716,20 @@
         [((? TCut?) _) (⊔ (resolve τ ρ) σ ρ)]
         [(_ (? TCut?)) (⊔ τ (resolve σ ρ) ρ)]
         ;; Maintain invariant that heap allocation annotations are only one deep.
-        [((THeap: _ taddr0 τ) (THeap: _ taddr1 σ))
+        [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
+         (define (both)
+           (mk-TRUnion #f (list (mk-THeap #f taddr0 tag0 τ)
+                                (mk-THeap #f taddr1 tag1 σ))))
          (match (⊔ taddr0 taddr1 ρ)
-           [(? TRUnion?) (mk-TRUnion #f (list (mk-THeap #f taddr0 τ)
-                                              (mk-THeap #f taddr1 σ)))]
-           [(? TAddr? ta) (mk-THeap #f ta (⊔ τ σ ρ))]
+           [(? TRUnion?) (both)]
+           [(? TAddr? ta) (if (equal? tag0 tag1)
+                              (mk-THeap #f ta tag0 (⊔ τ σ ρ))
+                              (both))]
            [bad (error 'type-join "Non-TAddr join? ~a ~a => ~a" taddr0 taddr1 bad)])]
-        [((THeap: _ taddr τ) (not (? THeap? σ)))
-         (mk-THeap #f taddr (⊔ τ σ ρ))]
-        [((not (? THeap? τ)) (THeap: _ taddr σ))
-         (mk-THeap #f taddr (⊔ τ σ ρ))]
+        [((THeap: _ taddr tag τ) (not (? THeap? σ)))
+         (mk-THeap #f taddr tag (⊔ τ σ ρ))]
+        [((not (? THeap? τ)) (THeap: _ taddr tag σ))
+         (mk-THeap #f taddr tag (⊔ τ σ ρ))]
         [((TAddr: _ space mm0 em0) (TAddr: _ space mm1 em1))
          (define mm (mode-comb mm0 mm1))
          (define em (mode-comb em0 em1))
@@ -817,19 +822,19 @@
        [(_ (TName: _ x)) (meet-named x τ)]
        [((? TCut?) _) (⊓ (resolve τ ρ) σ ρ)]
        [(_ (? TCut?)) (⊓ τ (resolve σ ρ) ρ)]
-       [((THeap: _ taddr0 τ) (THeap: _ taddr1 σ))
+       [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
          (match (⊓ taddr0 taddr1 ρ)
            [(? TAddr? ta)
             (define inner (⊓ τ σ ρ))
             (if (T⊥? inner)
                 T⊥ ;; XXX: don't heap-allocate bottom?
-                (mk-THeap #f ta inner))]
+                (mk-THeap #f ta (or tag0 tag1) inner))] ;; XXX: is left-bias bad here?
            [(? T⊥?) T⊥]
            [bad (error 'type-meet "Non-TAddr meet? ~a ~a => ~a" taddr0 taddr1 bad)])]
-       [((THeap: _ taddr τ) (not (? THeap? σ)))
-        (mk-THeap #f taddr (⊓ τ σ ρ))]
-       [((not (? THeap? τ)) (THeap: _ taddr σ))
-        (mk-THeap #f taddr (⊓ τ σ ρ))]
+       [((THeap: _ taddr tag τ) (not (? THeap? σ)))
+        (mk-THeap #f taddr tag (⊓ τ σ ρ))]
+       [((not (? THeap? τ)) (THeap: _ taddr tag σ))
+        (mk-THeap #f taddr tag (⊓ τ σ ρ))]
        [((TAddr: _ space mm0 em0) (TAddr: _ space mm1 em1))
          (define mm (mode-comb mm0 mm1))
          (define em (mode-comb em0 em1))
@@ -942,7 +947,7 @@
            [(? needs-resolve?) (collect (resolve τ) TVs Name-TVs found)]
            [(TMap: _ d r _)
             (collect r TVs Name-TVs (collect d TVs Name-TVs found))]
-           [(or (TSet: _ v _) (THeap: _ _ v)) (collect v TVs Name-TVs found)]
+           [(or (TSet: _ v _) (THeap: _ _ _ v)) (collect v TVs Name-TVs found)]
            [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
            [_ found])]))
      (reverse (collect τ '() '() found)))))

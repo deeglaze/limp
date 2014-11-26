@@ -28,19 +28,28 @@
 (define (flat-ED q p)
   (ED #'flat-⊔ #'flat-⊑ #'flat-≡ #'flat-card #'flat-touch q #'flat-pretty p))
 
-(define Ltest
-  (Language #hasheq()
-            #hasheq()
-            (make-hasheq)
-            '()
-            ∅
-            #hasheq()
-            (make-hasheq)))
-
-(define current-language (make-parameter Ltest))
-
 (define limp-externalize-default #t)
 (define limp-default-mm 'delay)
 (define limp-default-em 'identity)
 (define limp-default-addr-space 'limp)
 (define limp-default-lookup-mode 'delay)
+(define defaults
+  (hasheq 'mm limp-default-mm
+          'em limp-default-em
+          'addr-space limp-default-addr-space
+          'lm limp-default-lookup-mode
+          'externalize limp-externalize-default))
+
+(define L₀
+  (Language defaults ⊥ (make-hash) '() ∅ ⊥ (make-hash)))
+(define current-language (make-parameter L₀))
+
+(define (get-option op #:use [u (current-language)])
+  (define ops (cond
+               [(Language? u) (Language-options u)]
+               [(hash? u) u]
+               [else ⊥]))
+  (define res (hash-ref ops op unmapped))
+  (if (unmapped? res)
+      (hash-ref defaults op (λ () (error 'get-option "Unknown option ~a" op)))
+      res))

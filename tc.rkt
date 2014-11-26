@@ -49,7 +49,7 @@
           (or ct (Check τ))
           (match τ
             ;; We have a one-off that needs a dereference coercion
-            [(THeap: sy taddr τ*)
+            [(THeap: sy taddr tag τ*)
              (if (<:? τ* expect)
                  (Deref τ (or ct (Check τ)))
                  (bad))]
@@ -178,9 +178,9 @@
            [(TVariant: _ n* τs tr)
             ;; Name and length match due to type-meet
             (values τs #f (λ (τs) (*TVariant #f n τs tr)))]
-           [(THeap: sy taddr (TVariant: _ n* τs tr))
+           [(THeap: sy taddr tag (TVariant: _ n* τs tr))
             ;; Name and length match due to type-meet
-            (values τs #f (λ (τs) (mk-THeap sy taddr (*TVariant #f n τs tr))))]
+            (values τs #f (λ (τs) (mk-THeap sy taddr tag (*TVariant #f n τs tr))))]
            ;; XXX: is this the right behavior?
            [_ (values (make-list len T⊤)
                       (type-error "Given variant ~a with arity ~a, expected overlap with ~a {~a}"
@@ -205,8 +205,8 @@
        (define-values (exk exv hfy)
          (match (resolve (type-meet expect-overlap generic-map))
            [(TMap: _ d r ext) (values d r (λ (d r) (mk-TMap #f d r ext)))]
-           [(THeap: sy taddr (TMap: _ d r ext))
-            (values d r (λ (d r) (mk-THeap sy taddr (mk-TMap #f d r ext))))]
+           [(THeap: sy taddr tag (TMap: _ d r ext))
+            (values d r (λ (d r) (mk-THeap sy taddr tag (mk-TMap #f d r ext))))]
            ;; XXX: if not a map, then what?
            [_ (values T⊤ T⊤ (λ (d r) (mk-TMap #f d r limp-externalize-default)))]))
        (define-values (Γ* k*) (tc Γ k exk))
@@ -223,8 +223,8 @@
        (define-values (exv hfy)
          (match (resolve (type-meet expect-overlap generic-set))
            [(TSet: _ v ext) (values v (λ (τ) (mk-TSet #f τ ext)))]
-           [(THeap: sy taddr (TSet: _ v ext))
-            (values v (λ (τ) (mk-THeap sy taddr (mk-TSet #f τ ext))))]           
+           [(THeap: sy taddr tag (TSet: _ v ext))
+            (values v (λ (τ) (mk-THeap sy taddr tag (mk-TSet #f τ ext))))]           
            [_ (values T⊤ (λ (τ) (mk-TSet #f T⊤ limp-externalize-default)))]))
        (define-values (Γ* v*) (tc Γ v exv))
        (define-values (Γ** p*) (tc Γ* p expect-overlap))
@@ -233,14 +233,16 @@
                      v* p*))]
 
       [(PDeref sy _ p)
-       (PDeref sy
-               (match (resolve (πct ct))
-                 [(or (? TAddr?)
-                      (TSUnion: _ (list (? TAddr?) ...))
-                      (TRUnion: _ (list (? TAddr?) ...)))
-                  (chk T⊤)]
-                 [τ (type-error "Deref patterns must be unambiguously address types")])
-               (tc Γ p T⊤))]
+       (define expect*
+         (match (resolve (πct ct))
+           [(or (? TAddr?)
+                (TSUnion: _ (list (? TAddr?) ...))
+                (TRUnion: _ (list (? TAddr?) ...)))
+            (chk T⊤)]
+           [(THeap: _ taddr tag τ)
+            (Check τ)]
+           [τ (type-error "Deref patterns must be unambiguously address types")]))
+       (PDeref sy expect* (tc Γ p (πct expect*)))]
 
       [(PTerm sy _ t)
        (define t* (tc-term Γ Ξ t expect-overlap))

@@ -16,6 +16,9 @@ and semantics.
   (match ct
     [(Cast _) (Cast τ)]
     [(Check _) (Check τ)]
+    ;; If replacing a Deref, it's for inserting coercions,
+    ;; so we remove the deref at this point.
+    [(? Deref?) (error 'ct-replace-τ "Uh oh. Deref of THeap? ~a" ct)]
     [(Trust _) (error 'ct-replace-τ "Noooo ~a ~a" ct τ)]))
 
 (define (replace-ct ct v)
@@ -294,6 +297,9 @@ term template
 (struct EVariant Expression (n tag τs es) #:transparent)
 (struct ERef Expression (x) #:transparent)
 (struct EStore-lookup Expression (k lm) #:transparent) ;; lm ::= 'resolve | 'delay | 'deref
+;; TODO: add a "ghost" store lookup that is identity concretely,
+;;       but expects to need a deref in the transform.
+;;       It exists to change the default deref behavior.
 (struct EAlloc Expression (tag) #:transparent) ;; space mm em in type
 (struct ELet Expression (bus body) #:transparent)
 (struct EMatch Expression (discriminant rules) #:transparent)
@@ -301,9 +307,6 @@ term template
 (struct EEmpty-Map Expression () #:transparent)
 (struct EEmpty-Set Expression () #:transparent)
 (struct ESet-add Expression (s tag v) #:transparent)
-;; TODO: add a "ghost" store lookup that is identity concretely,
-;;       but expects to need a deref in the transform.
-;;       It exists to change the default deref behavior.
 ;; utility expressions
 (struct ESet-union Expression (es) #:transparent)
 (struct ESet-intersection Expression (e es) #:transparent)

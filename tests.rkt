@@ -9,6 +9,7 @@
          "alloc-rules.rkt"
          "common.rkt"
          "conservative.rkt"
+         "insert-coercions.rkt"
          "language.rkt"
          "mkv.rkt"
          "parser.rkt"
@@ -52,9 +53,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-(type-print-verbosity 2)
-(pattern-print-verbosity 3)
-(expr-print-verbosity 3)
+;(type-print-verbosity 2)
+;(pattern-print-verbosity 3)
+;(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -156,7 +157,11 @@
           (tc-language CEK '() Sτ))     ;  (pretty-print CEK*)
 
         (pretty-print CEK*)
-        (report-all-errors CEK*))
+        (report-all-errors CEK*)
+        (define-values (CEK2 metafunctions2)
+          (coerce-language CEK* metafunctions*))
+        (report-all-errors CEK2)
+        (pretty-print CEK2))
       #|
       (define-values (CEK** mf*) (language->add-AU CEK* '()))
       (displayln "Built.")

@@ -70,15 +70,12 @@ single address space
            #:fail-when (and (attribute tag-s) (not tag?))
            "Unexpected #:tag annotation"
            #:attr mm (or (attribute mm*.mm)
-                         (hash-ref ops 'match-mode #f)
-                         limp-default-mm)
+                         (get-option 'mm #:use ops))
            #:attr em (or (attribute em*.em)
-                         (hash-ref ops 'equality-mode #f)
-                         limp-default-em)
+                         (get-option 'em #:use ops))
            #:attr tag (and (attribute tag-s) (syntax-e #'tag-s))
            #:attr space (or (and (attribute space-s) (syntax-e #'space-s))
-                            (hash-ref ops 'addr-space #f)
-                            limp-default-addr-space)))
+                            (get-option 'addr-space #:use ops))))
 
 (define (->ref x Unames Enames meta-table taddr)
   (let* ([sym (syntax-e x)]
@@ -92,7 +89,7 @@ single address space
        [else
         (mk-TFree x sym)]))
     (if taddr
-        (THeap taddr τ)
+        (mk-THeap x taddr #f τ) ;; No tag in types.
         τ)))
 
 (define-splicing-syntax-class (formal-splicing options)
@@ -402,8 +399,7 @@ single address space
   (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)))
            #:attr e (EStore-lookup #'sy ct
                                    (attribute ek.e)
-                                   (or (attribute mode.lm)
-                                       limp-default-lookup-mode)))
+                                   (or (attribute mode.lm) (get-option 'lm L))))
   (pattern (~and sy (#:alloc (~var ops (EM-Modes (Language-options L) #t #t))))
            #:attr e (EAlloc #'sy
                             (or ct ;; FIXME: same as above
@@ -608,9 +604,15 @@ Turn all free non-metavariables into external space names if they are bound.
                       (~optional (~and #:require-metavariables require-meta))
                       (~optional (~and #:check-metavariables check-meta))
                       (~optional (~and #:include-pattern-namespace pattern-namespace))
+                      (~optional (~and #:default-externalize ext))
+                      (~optional (~and #:default-no-externalize next))
                       (~optional (~seq #:default-match-mode mm:Match-Mode))
                       (~optional (~seq #:default-equality-mode em:Equality-Mode))
-                      (~optional (~seq #:default-addr-space space:id))) ...)
+                      (~optional (~seq #:default-lookup-mode lm:Lookup-Mode))
+                      (~optional (~seq #:default-addr-space space:id))
+                      ) ...)
+           #:fail-when (and (syntax? (attribute ext)) (syntax? (attribute next)))
+           "Must choose at most one of #:default-externalize #:default-no-externalize"
            #:do [(define base-ops
                    (if lang
                        (Language-options lang)
@@ -620,15 +622,22 @@ Turn all free non-metavariables into external space names if they are bound.
                      (match kvs
                        ['() h]
                        [(list-rest k v kvs)
-                        (rec (if v (hash-set h k v) h) kvs)]
+                        (rec (if (if (eq? k 'externalize) (boolean? v) v)
+                                 (hash-set h k v) h)
+                             kvs)]
                        [_ (error 'Lang-options-cls "internal error, odd kvs list: ~a" kvs)])))
                  (define ops
                    (do-op base-ops
                           'pun-space-names (syntax? (attribute pun-space))
                           'require-metavariables (syntax? (attribute require-meta))
                           'check-metavariables (syntax? (attribute check-meta))
-                          'match-mode (attribute mm.mm)
-                          'equality-mode (attribute em.em)
+                          'mm (attribute mm.mm)
+                          'em (attribute em.em)
+                          'lm (attribute lm.lm)
+                          'externalize (cond
+                                        [(syntax? (attribute ext)) #t]
+                                        [(syntax? (attribute next)) #f]
+                                        [else 'unset])
                           'addr-space (and (attribute space) (syntax-e #'space))
                           'include-pattern-namespace (syntax? (attribute pattern-namespace))))
                  (define L

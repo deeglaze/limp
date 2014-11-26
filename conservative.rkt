@@ -140,9 +140,9 @@ lhs: (U
     ;; We use this type to propagate heap allocations and dereferences.
     (define-values (ct* eτ)
       (match (πcc e)
-        [(THeap: sy taddr eτ)
-         (values (Check taddr) (mk-THeap sy taddr eτ))]
-        [τ (values ct (mk-THeap #f (πct ct) τ))]))
+        [(THeap: sy taddr tag eτ)
+         (values (Check taddr) (mk-THeap sy taddr tag eτ))]
+        [τ (values ct (mk-THeap #f (πct ct) #f τ))]))
     (define xct (Check eτ))
     (define sy (with-stx-stx e))
     (ELet sy (Trust eτ)

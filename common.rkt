@@ -9,6 +9,9 @@
 (define ∅eq (seteq))
 (define ∅ (set))
 (define ⊥ (hash))
+(struct -unmapped ())
+(define unmapped (-unmapped))
+(define (unmapped? x) (eq? x unmapped))
 
 (define-syntax (define-for/do stx)
   (syntax-parse stx

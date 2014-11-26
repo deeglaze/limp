@@ -146,7 +146,7 @@
   (define (heap-alloc sy t taddr)
     (match t
       [(? THeap?) t]
-      [(? heap-allocate?) (mk-THeap sy taddr t)]
+      [(? heap-allocate?) (mk-THeap sy taddr #f t)]
       [t (self t)]))
   (define (try-alloc? τ tr)
     (and (untrusted? tr)
