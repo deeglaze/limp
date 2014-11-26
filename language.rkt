@@ -2,21 +2,16 @@
 (require "common.rkt")
 (provide (all-defined-out))
 
-;; A Trust-Tag is one of
-;; - 'untrusted 
-;; - 'bounded [only destructed]
-;; - 'trusted [allowed to be constructed without heap-allocation]
-(define (untrusted? x) (eq? x 'untrusted))
-
 (struct User-Space (τ bounded? trust-construction?) #:prefab)
 
-(struct Language (options ;; Map[symbol,any]
-                  external-spaces ;; Map[Name,ED]
-                  E<: ;; Set[(U Pair[Name,τ] Pair[τ, Name])]
-                  user-spaces ;; Mutable-Map[Name,Type]
-                  ordered-us ;; List[Pair[Name,Type]]
-                  meta-table ;; if #:check-metavariables is given, names include a space check.
-                  uspace-info) ;; Mutable-Map[Name,Vector[Bool, Bool, ℕ]]
+(struct Language
+        (options                       ;; Map[symbol,any]
+         external-spaces               ;; Map[Name,ED]
+         user-spaces                   ;; Mutable-Map[Name,Type]
+         ordered-us ;; List[Pair[Name,Type]]
+         E<: ;; Set[(U Pair[Name,τ] Pair[τ, Name])]
+         meta-table ;; if #:check-metavariables is given, names include a space check.
+         uspace-info) ;; Mutable-Map[Name,Vector[Bool, Bool, ℕ]]
         #:prefab)
 
 (struct Reduction-relation (rules τ) #:prefab)
@@ -36,10 +31,10 @@
 (define Ltest
   (Language #hasheq()
             #hasheq()
-            ∅
             (make-hasheq)
+            '()
+            ∅
             #hasheq()
-            #hash()
             (make-hasheq)))
 
 (define current-language (make-parameter Ltest))

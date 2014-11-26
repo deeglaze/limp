@@ -9,12 +9,14 @@ and semantics.
 
 (struct with-stx (stx) #:transparent)
 (struct Typed with-stx (ct) #:transparent)
-(define πct (match-lambda
-             [(or (Cast t) (Check t)) t]
-             [_ #f]))
 (define πcc (match-lambda
              [(Typed _ ct) (πct ct)]
              [_ #f]))
+(define (ct-replace-τ ct τ)
+  (match ct
+    [(Cast _) (Cast τ)]
+    [(Check _) (Check τ)]
+    [(Trust _) (error 'ct-replace-τ "Noooo ~a ~a" ct τ)]))
 
 (define (replace-ct ct v)
   (cond [(Pattern? v) (pattern-replace-ct ct v)]
@@ -31,6 +33,8 @@ and semantics.
     [#f sexp]
     [(Check σ) `(#:ann ,(type->sexp σ) ,sexp)]
     [(Cast σ) `(#:cast ,(type->sexp σ) ,sexp)]
+    [(Trust σ) `(TRUST$ ,(type->sexp σ) ,sexp)]
+    [(Deref taddr ct) `(#:after-deref ,(type->sexp taddr) ,(ann-wrap ct sexp))]
     [_ `(error$ 'ann-wrap ,(format "Bad ct: ~a" ct))]))
 
 ;; Elaborated patterns
@@ -94,6 +98,8 @@ and semantics.
 (struct PSet-with Pattern (v p) #:transparent)
 (struct PSet-with* Pattern (v p) #:transparent)
 (struct PTerm Pattern (t) #:transparent)
+;; Expect an address always, so deref and continue matching.
+(struct PDeref Pattern (p) #:transparent)
 ;; The info is in the type
 (struct PIsExternal Pattern () #:transparent)
 (struct PIsAddr Pattern () #:transparent)
@@ -110,6 +116,7 @@ pattern template:
     [(PSet-with sy ct v p) ???]
     [(PSet-with* sy ct v p) ???]
     [(PTerm sy ct t) ???]
+    [(PDeref sy ct p) ???]
     [(PIsExternal sy ct) ???]
     [(PIsAddr sy ct) ???]
     [(PIsType sy ct) ???]
@@ -152,6 +159,7 @@ pattern template:
     [((PSet-with* _ ct v0 p0) (PSet-with* _ ct v1 p1))
      (sequence-pattern-α-equal? (list v0 p0) (list v1 p1) ρ0 ρ1)]
     [((PTerm _ ct t0) (PTerm _ ct t1)) (values ρ0 ρ1 (term-α-equal? t0 t1))]
+    [((PDeref _ ct p0) (PDeref _ ct p1)) (pattern-α-equal? p0 p1)]
     [((PIsExternal _ ct) (PIsExternal _ ct)) (values ρ0 ρ1 #t)]
     [((PWild _ ct) (PWild _ ct)) (values ρ0 ρ1 #t)]
     [((PIsAddr _ ct) (PIsAddr _ ct)) (values ρ0 ρ1 #t)]
@@ -240,6 +248,7 @@ term template
         [(EEmpty-Map _ _) '#:empty-map]
         [(EEmpty-Set _ _) '#:empty-set]
         [(ESet-union _ _ es) `(#:union . ,(map rec es))]
+        [(ESet-add _ _ e tag es) `(#:set-add ,(rec e) ,@(do-tag tag) . ,(map rec es))]
         [(ESet-intersection _ _ e es) `(#:intersection ,(rec e) . ,(map rec es))]
         [(ESet-subtract _ _ e es) `(#:subtract ,(rec e) . ,(map rec es))]
         [(ESet-member _ _ e v) `(#:member? ,(rec e) ,(rec v))]
@@ -266,6 +275,7 @@ term template
     [(EEmpty-Map sy _) (EEmpty-Map sy ct)]
     [(EEmpty-Set sy _) (EEmpty-Set sy ct)]
     [(ESet-union sy _ es) (ESet-union sy ct es)]
+    [(ESet-add sy _ e tag es) (ESet-add sy ct e tag es)]
     [(ESet-intersection sy _ e es) (ESet-intersection sy ct e es)]
     [(ESet-subtract sy _ e es) (ESet-subtract sy ct e es)]
     [(ESet-member sy _ e v) (ESet-member sy ct e v)]
@@ -290,8 +300,11 @@ term template
 (struct EExtend Expression (m tag k v) #:transparent)
 (struct EEmpty-Map Expression () #:transparent)
 (struct EEmpty-Set Expression () #:transparent)
-(struct ESet-add Expression (s v) #:transparent)
-;; Utility expressions
+(struct ESet-add Expression (s tag v) #:transparent)
+;; TODO: add a "ghost" store lookup that is identity concretely,
+;;       but expects to need a deref in the transform.
+;;       It exists to change the default deref behavior.
+;; utility expressions
 (struct ESet-union Expression (es) #:transparent)
 (struct ESet-intersection Expression (e es) #:transparent)
 (struct ESet-subtract Expression (e es) #:transparent)
@@ -300,6 +313,8 @@ term template
 (struct EMap-lookup Expression (m k) #:transparent)
 (struct EMap-has-key Expression (m k) #:transparent)
 (struct EMap-remove Expression (m k) #:transparent)
+
+(struct implicit-tag (tag) #:prefab)
 #|
 expr template
  (match e
@@ -314,6 +329,7 @@ expr template
     [(EEmpty-Map sy ct) ???]
     [(EEmpty-Set sy ct) ???]
     [(ESet-union sy ct es) ???]
+    [(ESet-add sy ct e tag es) ???]
     [(ESet-intersection sy ct e es) ???]
     [(ESet-subtract sy ct e es) ???]
     [(ESet-member sy ct e v) ???]
@@ -361,6 +377,9 @@ expr template
     [((EEmpty-Set _ ct) (EEmpty-Set _ ct)) #t]
     [((ESet-union _ ct es0) (ESet-union _ ct es1))
      (equal*? es0 es1)]
+    [((ESet-add _ ct e0 tag es0) (ESet-add _ ct e1 tag es1))
+     (and (expr-α-equal? e0 e1 ρ0 ρ1)
+          (equal*? es0 es1))]
     [((ESet-intersection _ ct e0 es0) (ESet-intersection _ ct e1 es1))
      (and (expr-α-equal? e0 e1 ρ0 ρ1)
           (equal*? es0 es1))]
@@ -539,6 +558,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (abstract-frees-in-term t names))]
+      [(PDeref sy _ p) (PDeref sy ct* (self p))]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]
@@ -557,6 +577,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t names))]
+      [(PDeref sy _ p) (PDeref sy ct* (self p))]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]
@@ -599,6 +620,7 @@ expr template
       [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
       [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
       [(ESet-union sy _ es) (ESet-union sy ct* (map self es))]
+      [(ESet-add sy _ e tag es) (ESet-add sy ct* (self e) tag (map self es))]
       [(ESet-intersection sy _ e es) (ESet-intersection sy ct* (self e) (map self es))]
       [(ESet-subtract sy _ e es) (ESet-subtract sy ct* (self e) (map self es))]
       [(ESet-member sy _ e v) (ESet-member sy ct* (self e) (self v))]
@@ -626,6 +648,7 @@ expr template
       [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
       [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
       [(ESet-union sy _ es) (ESet-union sy ct* (map self es))]
+      [(ESet-add sy _ e tag es) (ESet-add sy ct* (self e) tag (map self es))]
       [(ESet-intersection sy _ e es) (ESet-intersection sy ct* (self e) (map self es))]
       [(ESet-subtract sy _ e es) (ESet-subtract sy ct* (self e) (map self es))]
       [(ESet-member sy _ e v) (ESet-member sy ct* (self e) (self v))]

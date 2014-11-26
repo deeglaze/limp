@@ -6,23 +6,27 @@
          racket/set
          rackunit
          syntax/parse
+         "alloc-rules.rkt"
          "common.rkt"
+         "conservative.rkt"
          "language.rkt"
          "mkv.rkt"
          "parser.rkt"
+         "self-reference.rkt"
          "tast.rkt"
          "tc.rkt"
          "types.rkt")
 
+;; If there are any time or space leaks, kill the tests.
 (with-limits 10 1024
  (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()] #:use-lang? [use-lang? #f])
    (define-values (unames* enames* meta-table*)
      (if use-lang?
-         (match-let ([(Language _ ES _ US _ MT _) (current-language)])
+         (match-let ([(Language _ ES US _ _ MT _) (current-language)])
            (values (hash-key-set US) (hash-key-set ES) MT))
          (values unames enames meta-table)))
    (syntax-parse stx
-     [(~var t (TopPreType unames* enames* meta-table*)) (attribute t.t)]))
+     [(~var t (TopPreType #hash() unames* enames* meta-table*)) (attribute t.t)]))
  (define (parse-expr stx)
    (syntax-parse stx
      [(~var e (Expression-cls (current-language) #f)) (attribute e.e)]))
@@ -48,9 +52,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-;(type-print-verbosity 2)
-;(pattern-print-verbosity 3)
-;(expr-print-verbosity 3)
+(type-print-verbosity 2)
+(pattern-print-verbosity 3)
+(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -85,7 +89,7 @@
 
  ;; Fails because simplification doesn't heed language
  (parameterize ([current-language
-                 (Language #hash() #hash() ∅ (make-hash us-test) us-test  #hash() (make-hash))])
+                 (Language #hash() #hash() (make-hash us-test) us-test ∅ #hash() (make-hash))])
    (check-equal?
     (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) 'dc)))
     (set (quantify-frees foo-x-y '(y x))
@@ -95,7 +99,7 @@
    (define xτ (parse-type #'(#:inst Cord (bloo) (blah)) (set 'List 'Blor 'Cord)))
    (define Γ (hasheq 'x xτ))
    (check expr-α-equal?
-    ((tc-expr Γ #hasheq())
+          ((tc-expr Γ #hasheq())
      (parse-expr #'(#:match x [(foo y z) z])))
     (parse-expr #'(#:ann (blah) (#:match (#:ann (#:inst Cord (bloo) (blah)) x)
                                          [(#:ann (foo (bloo) (blah))
@@ -103,45 +107,122 @@
                                                       (#:ann (blah) z)))
                                           (#:ann (blah) z)])))))
 
+(define CEK-lang (parse-language
+                  #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]
+                     [(x) #:external Name #:parse identifier?]
+                     [Value (Clo x Expr Env)]
+                     [(ρ) Env (#:map Name Value #:externalize)]
+                     [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
+                     [(φ) Frame (ar Expr Env) (fn Value)]
+                     [(κ) Kont (#:inst List Frame)]
+                     [State (ev Expr Env Kont)
+                            (co Kont Value)
+                            (ap x Expr Env Value Kont)])))
+
+(define CEK-Rstx
+  #'([#:--> (ev (app e0 e1) ρ κ)
+            (ev e0 ρ (Cons (ar e1 ρ) κ))]
+     [#:--> (ev (lam y e) ρ κ)
+            (co κ (Clo y e ρ))]
+     [#:--> #:name var-lookup
+            (ev (#:and (#:has-type Name) x) ρ κ)
+            (co κ (#:map-lookup ρ x))]
+
+     [#:--> (co (Cons (ar e ρ) κ) v)
+            (ev e ρ (Cons (fn v) κ))]
+     [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
+            (ap z e ρ v κ)]
+
+     [#:--> #:name fun-app
+            (ap w e ρ v κ)
+            (ev e (#:extend ρ w v) κ)]))
+
+;; typecheck without heap allocation.
+(parameterize ([instantiations (make-hash)])
+  (parameterize ([current-language CEK-lang])
+    (define CEK0 (parse-reduction-relation CEK-Rstx))
+    (define Sτ0 (resolve (parse-type #'State #:use-lang? #t)))
+    (define-values (CEK*0 metafunctions*0)
+      (tc-language CEK0 '() Sτ0))         ;  (pretty-print CEK*)
+    (report-all-errors CEK*0)
+
+    ;; typecheck with heap allocation
+    (parameterize ([current-language (heapify-language CEK-lang #f)])
+      (pretty-print (Language-user-spaces (current-language)))
+      (define CEK (parse-reduction-relation CEK-Rstx))
+      (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
+      (parameterize ([instantiations (make-hash)])
+        (define-values (CEK* metafunctions*)
+          (tc-language CEK '() Sτ))     ;  (pretty-print CEK*)
+
+        (pretty-print CEK*)
+        (report-all-errors CEK*))
+      #|
+      (define-values (CEK** mf*) (language->add-AU CEK* '()))
+      (displayln "Built.")
+      (parameterize ([current-language (heapify-language (current-language))])
+      (displayln "Heapified")
+      (define-values (CEK*** mf**)
+      (tc-language CEK** mf* Sτ))
+
+      (displayln "Checked.")
+      (report-all-errors CEK***)
+      (pretty-print CEK***)
+
+      (define-values (CEKi mfi) (join-rhs-clear-lhs CEK*** mf**))
+      (report-all-errors CEKi)
+      (pretty-print CEKi)
+
+      (language->mkV CEK* '() void))
+      |#
+)))
+
 (parameterize ([current-language
                 (parse-language
                  #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]
                     [(x) #:external Name #:parse identifier?]
                     [Value (Clo x Expr Env)]
-                    [(ρ) Env (#:map Name Value #:externalize)]
-                    [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
+                    ;; Changed Env and List. Algorithmic rules for this?
+                    [(ρ) Env (#:map Name (#:addr #:delay #:structural) #:externalize)]
+                    [List (#:Λ X (#:U (Nil) (Cons X (#:addr #:delay #:structural))))]
                     [(φ) Frame (ar Expr Env) (fn Value)]
                     [(κ) Kont (#:inst List Frame)]
                     [State (ev Expr Env Kont)
                            (co Kont Value)
                            (ap x Expr Env Value Kont)]))])
-  (define CEK
-    (parse-reduction-relation #'([#:--> (ev (app e0 e1) ρ κ)
-                                        (ev e0 ρ (Cons (ar e1 ρ) κ))]
-                                 [#:--> (ev (lam y e) ρ κ)
-                                        (co κ (Clo y e ρ))]
-                                 [#:--> #:name var-lookup
-                                        (ev (#:and (#:has-type Name) x) ρ κ)
-                                        (co κ (#:map-lookup ρ x))]
+  (define naive-rewrite
+    (parse-reduction-relation
+     #'([#:--> (ev (app e0 e1) ρ κ)
+               (ev e0 ρ (Cons #:tag appL (ar e1 ρ)
+                              (#:let ([#:where a (#:alloc #:tag rule-0-cons-1
+                                                          #:delay #:structural)]
+                                      [#:update a κ])
+                                     a)))]
+        [#:--> (ev (lam y e) ρ κ)
+               (co κ (Clo y e ρ))]
+        [#:--> #:name var-lookup
+               (ev (#:and (#:has-type Name) x) ρ κ)
+               (co κ (#:cast Value (#:lookup (#:map-lookup ρ x) #:delay)))] ;; ADDED #:lookup, #:cast
 
-                                 [#:--> (co (Cons (ar e ρ) κ) v)
-                                        (ev e ρ (Cons (fn v) κ))]
-                                 [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
-                                        (ap z e ρ v κ)]
+        [#:--> (co (Cons (ar e ρ) κ) v)
+               (ev e ρ (Cons #:tag appR (fn v) (#:let ([#:where a (#:alloc #:tag rule-3-cons-1
+                                                                           #:delay #:structural)]
+                                                       [#:update a κ])
+                                                      a)))]
+        [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
+               (ap z e ρ v (#:cast Kont (#:lookup κ #:delay)))] ;; ADDED #:lookup, #:cast
 
-                                 [#:--> #:name fun-app
-                                        (ap w e ρ v κ)
-                                        (ev e (#:extend ρ w v) κ)])))
- 
-
+        [#:--> #:name fun-app
+               (ap w e ρ v κ)
+               (ev e (#:extend ρ #:tag ext w
+                               (#:let ([#:where a (#:alloc #:tag ext-value #:delay #:structural)]
+                                       [#:update a v])
+                                      a))
+                   κ)])))
   (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
-  (define CEK* (tc-rules #hash() #hash() CEK Sτ Sτ))
-
-  (pretty-print CEK*)
-
-  (report-all-errors CEK*)
-
-  (language->mkV CEK* '() void))
+  (define-values (naive* metafunctions*2)
+    (tc-language naive-rewrite '() Sτ))
+  (report-all-errors naive*))
 
 (parameterize ([current-language
                 (parse-language
@@ -185,6 +266,11 @@
                                        (ap ws e ρ vs κ)
                                        (ev e (#:call extend* #:inst [Name Value] ρ ws vs) κ)])))
 
+ (define match-thru
+   ((tc-expr (hasheq 'x (parse-type #'Value #:use-lang? #t)) #hasheq())
+     (parse-expr #'(#:match x [(Clo xs e (#:map-with y (Clo ys e* ρ) ρ*)) e*]))))
+ (report-all-errors match-thru)
+
  (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
  (define metafunctions
    (list
@@ -205,9 +291,6 @@
  
  (define-values (CESK* metafunctions*)
    (tc-language CESK metafunctions Sτ))
-
- (pretty-print CESK*)
- (pretty-print metafunctions*)
 
  (report-all-errors
   (append (append-map (compose peel-scopes Metafunction-rules) metafunctions*)

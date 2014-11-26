@@ -1,6 +1,7 @@
 #lang racket/base
 (require (for-syntax racket/base syntax/parse racket/syntax)
          (only-in racket/bool implies)
+         racket/dict
          racket/list
          racket/match
          racket/pretty
@@ -57,7 +58,7 @@ single address space
            "Cannot specify both #:unfold and either #:bounded or #:trust-construction"
            #:attr n (if (attribute sn) (syntax-e #'sn) 0)))
 
-(define-splicing-syntax-class (EM-Modes space? tag?)
+(define-splicing-syntax-class (EM-Modes ops space? tag?)
   #:attributes (em mm tag space)
   (pattern (~seq (~or 
                   (~optional (~seq #:tag tag-s:expr))
@@ -68,24 +69,16 @@ single address space
            "Unexpected #:space annotation"
            #:fail-when (and (attribute tag-s) (not tag?))
            "Unexpected #:tag annotation"
-           #:attr mm (attribute mm*.mm)
-           #:attr em (attribute em*.em)
-           #:attr tag (and (attribute tag-s) (syntax-e #'tag-s))
-           #:attr space (and (attribute space-s) (syntax-e #'space-s))))
-
-(define-splicing-syntax-class (EM-Modes-default ops space? tag?)
-  #:attributes (em mm space tag)
-  (pattern (~var modes (EM-Modes space? tag?))
-           #:attr em (or (attribute modes.em)
-                         (hash-ref ops 'equality-mode #f)
-                         limp-default-em)
-           #:attr mm (or (attribute modes.mm)
+           #:attr mm (or (attribute mm*.mm)
                          (hash-ref ops 'match-mode #f)
                          limp-default-mm)
-           #:attr space (or (attribute modes.space)
+           #:attr em (or (attribute em*.em)
+                         (hash-ref ops 'equality-mode #f)
+                         limp-default-em)
+           #:attr tag (and (attribute tag-s) (syntax-e #'tag-s))
+           #:attr space (or (and (attribute space-s) (syntax-e #'space-s))
                             (hash-ref ops 'addr-space #f)
-                            limp-default-addr-space)
-           #:attr tag (attribute modes.tag)))
+                            limp-default-addr-space)))
 
 (define (->ref x Unames Enames meta-table taddr)
   (let* ([sym (syntax-e x)]
@@ -102,10 +95,10 @@ single address space
         (THeap taddr τ)
         τ)))
 
-(define-splicing-syntax-class formal-splicing
+(define-splicing-syntax-class (formal-splicing options)
   #:attributes (id x taddr)
   (pattern (~seq id:id (~or (~and #:trusted trusted)
-                           (~var modes (EM-Modes #t #f))))
+                           (~var modes (EM-Modes options #t #f))))
            #:fail-unless (or (syntax? (attribute trusted))
                              (or (attribute modes.mm)
                                  (attribute modes.em)
@@ -116,28 +109,28 @@ single address space
                             'trusted
                             (if (syntax? (attribute trusted))
                                 'trusted
-                                (mk-TAddr
-                                 (or (attribute modes.space)
-                                     limp-default-addr-space)
-                                 (or (attribute modes.mm)
-                                     limp-default-mm) 
-                                 (or (attribute modes.em)
-                                     limp-default-em))))))
+                                (mk-TAddr #'modes
+                                          (attribute modes.space)
+                                          (attribute modes.mm) 
+                                          (attribute modes.em))))))
 
-(define-syntax-class formal
+(define-syntax-class (formal options)
   #:attributes (id x taddr)
-  (pattern [:formal-splicing])
+  (pattern [(~var f (formal-splicing options))]
+           #:attr id (attribute f.id)
+           #:attr x (attribute f.x)
+           #:attr taddr (attribute f.taddr))
   (pattern id:id
            #:attr x (syntax-e #'id)
            #:attr taddr limp-default-Λ-addr))
 
-(define-syntax-class formals
+(define-syntax-class (formals options)
   #:attributes (ids xs taddrs)
-  (pattern f:formal
+  (pattern (~var f (formal options))
            #:attr ids (list (attribute f.id))
            #:attr xs (list (attribute f.x))
            #:attr taddrs (list (attribute f.taddr)))
-  (pattern (fs:formal ...)
+  (pattern ((~var fs (formal options)) ...)
            #:attr ids (attribute fs.id)
            #:attr xs (attribute fs.x)
            #:attr taddrs (attribute fs.taddr)))
@@ -151,17 +144,18 @@ single address space
                        [(syntax? (attribute nx)) #f]
                        [else 'dc])))
 
-(define-syntax-class (PreType trust Unames Enames meta-table)
+(define-syntax-class (PreType options trust Unames Enames meta-table)
   #:attributes (t)
-  #:local-conventions ([#rx"^t" (PreType trust Unames Enames meta-table)])
-  (pattern ((~or #:Λ #:∀ #:all) f:formals tbody)
+  #:local-conventions ([#rx"^t" (PreType options trust Unames Enames meta-table)])
+  (pattern ((~or #:Λ #:∀ #:all) (~var f (formals options)) tbody)
            #:attr t (quantify-frees (attribute tbody.t)
                                     (reverse (attribute f.xs))
                                     #:stxs (attribute f.ids)
                                     #:taddrs (attribute f.taddrs)))
   (pattern (~and sy
                  (#:μ x:id (~var ty:expr) u:Unrolling
-                      (~parse (~var tbody (PreType (attribute u.trust)
+                      (~parse (~var tbody (PreType options
+                                                   (attribute u.trust)
                                                    Unames Enames meta-table))
                               #'ty)))
            #:do [(define fv (free (attribute tbody.t)))
@@ -194,22 +188,27 @@ single address space
                                  (syntax-e #'n)
                                  (attribute ts.t)
                                  trust))
+  (pattern (~and sy (#:addr (~var modes (EM-Modes options #t #f))))
+           #:attr t (mk-TAddr #'sy
+                              (attribute modes.space)
+                              (attribute modes.mm)
+                              (attribute modes.em)))
   (pattern x:id #:attr t
            (->ref #'x Unames Enames meta-table #f))
-  (pattern [#:ref :formal-splicing]
-           #:attr t (->ref (attribute id) Unames Enames meta-table
-                           (attribute taddr)))
+  (pattern [#:ref (~var f (formal-splicing options))]
+           #:attr t (->ref (attribute f.id) Unames Enames meta-table
+                           (attribute f.taddr)))
   (pattern (~or #:⊤ #:top #:any) #:attr t T⊤)
   (pattern 3d #:when (Type? (syntax-e #'3d)) #:attr t (syntax-e #'3d)))
 
-(define-syntax-class (TopPreType Unames Enames meta-table)
+(define-syntax-class (TopPreType options Unames Enames meta-table)
   #:attributes (t)
-  (pattern (~var ty (PreType 'untrusted Unames Enames meta-table))
+  (pattern (~var ty (PreType options 'untrusted Unames Enames meta-table))
            #:attr t (attribute ty.t)))
 
 (define-syntax-class ClosedTopPreType
   #:attributes (t)
-  (pattern (~var ty (PreType 'untrusted ∅ ∅ #hasheq())) #:attr t (attribute ty.t)))
+  (pattern (~var ty (PreType #hash() 'untrusted ∅ ∅ #hasheq())) #:attr t (attribute ty.t)))
 
 (define-syntax-class Lookup-Mode
   #:attributes (lm)
@@ -276,6 +275,9 @@ single address space
 (define-syntax-class (phastype L)
   (pattern #:has-type)
   (pattern (~and (~literal has-type) (~var _ (inc-pat L)))))
+(define-syntax-class (pderef L)
+  (pattern #:deref)
+  (pattern (~and (~literal deref) (~var _ (inc-pat L)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Pattern syntax
@@ -309,7 +311,7 @@ single address space
   (pattern (~and sy ((~var _ (pname L)) x:id))
            #:attr pat (PName #'sy ct (syntax-e #'x)))
   (pattern (~and sy ((~var _ (paddr L)) name:id
-                     (~var modes (EM-Modes-default (Language-options L) #f #f))))
+                     (~var modes (EM-Modes (Language-options L) #f #f))))
            #:attr pat (PIsAddr #'sy
                                ;; FIXME: actually check that ct and the given taddr are the same
                                ;; since a mismatch is an error.
@@ -332,6 +334,8 @@ single address space
            #:when (mono-type? (attribute t.t))
            #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
                                         (Cast (attribute t.t)))))
+  (pattern (~and sy ((~var _ (pderef L)) (~optional (~seq #:space space:id)) p))
+           #:attr pat (PDeref #'sy ct (attribute p.pat)))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))
@@ -341,7 +345,8 @@ single address space
 
 (define-syntax-class (Type-cls allow-raw? L)
   #:attributes (t)
-  (pattern (~var pt (TopPreType (hash-key-set (Language-user-spaces L))
+  (pattern (~var pt (TopPreType (Language-options L)
+                                (hash-key-set (Language-user-spaces L))
                                 (hash-key-set (Language-external-spaces L))
                                 (Language-meta-table L)))
            #:do [(define t-op
@@ -399,7 +404,7 @@ single address space
                                    (attribute ek.e)
                                    (or (attribute mode.lm)
                                        limp-default-lookup-mode)))
-  (pattern (~and sy (#:alloc (~var ops (EM-Modes-default (Language-options L) #t #t))))
+  (pattern (~and sy (#:alloc (~var ops (EM-Modes (Language-options L) #t #t))))
            #:attr e (EAlloc #'sy
                             (or ct ;; FIXME: same as above
                                 (Check (mk-TAddr #'ops
@@ -559,30 +564,46 @@ Turn all free non-metavariables into external space names if they are bound.
            #:attr info (vector (attribute u.trust)
                                (attribute u.n))))
 
-(define-syntax-class (User-cls options Unames Enames meta-table space-info)
+(define-syntax-class (User-cls options Unames Enames meta-table space-info ext)
   #:attributes ((metas 1) name ty)
   #:description "Specify a user-defined value space"
   (pattern
    (~and
     ;; get the trust info first
-    [(~optional (:id ...)) :id (~or (~seq #:full :expr) (~seq :expr ...)) u:Unrolling]
+    [(~optional (:id ...)) :id (~or (~seq #:full :expr) (~seq :expr ... ))
+     (~optional (~datum ....)) u:Unrolling]
     ;; use trust withing type parsing.
     [(~optional (metas:id ...) #:defaults ([(metas 1) '()]))
      name:id
-     (~or (~seq #:full (~commit (~var fty (PreType (attribute u.trust) Unames Enames meta-table))))
-          (~commit (~seq (~var sty (PreType (attribute u.trust) Unames Enames meta-table)) ...)))
+     (~or (~seq #:full (~commit (~var fty (PreType options
+                                                   (attribute u.trust)
+                                                   Unames Enames
+                                                   meta-table))))
+          (~commit (~seq (~var sty (PreType options
+                                            (attribute u.trust)
+                                            Unames Enames
+                                            meta-table)) ...)))
+     (~optional (~and (~datum ....) extend))
      ;; shape only
      :Unrolling])
    #:fail-when (and (attribute fty.t) (attribute u))
    "Cannot specify full type and use #:bounded, #:trust-construction, or #:unfold"
-   #:do [(define pre-ty (*TRUnion #'(sty ...) (attribute sty.t)))]
+   #:fail-unless (implies (attribute extend) 
+                          (hash-has-key? (Language-user-spaces ext) (syntax-e #'name)))
+   "Can't extend a space that didn't originally exist."
+   #:do [(define pre-ty (*TRUnion #'(sty ...)
+                                  (if (attribute extend)
+                                      (cons
+                                       (hash-ref (Language-user-spaces ext) (syntax-e #'name))
+                                       (attribute sty.t))
+                                      (attribute sty.t))))]
    #:fail-unless (set-empty? (free pre-ty))
    (format "Space's type contains free variables: ~a (~a)"
            (syntax-e #'name) (free pre-ty))
    #:attr ty pre-ty))
 
-(define-splicing-syntax-class Lang-options-cls
-  #:attributes (options)
+(define-splicing-syntax-class (Lang-options-cls lang)
+  #:attributes (options op-lang)
   (pattern (~seq (~or (~optional (~and #:pun-space-names pun-space))
                       (~optional (~and #:require-metavariables require-meta))
                       (~optional (~and #:check-metavariables check-meta))
@@ -590,14 +611,33 @@ Turn all free non-metavariables into external space names if they are bound.
                       (~optional (~seq #:default-match-mode mm:Match-Mode))
                       (~optional (~seq #:default-equality-mode em:Equality-Mode))
                       (~optional (~seq #:default-addr-space space:id))) ...)
-           #:attr options
-           (hash 'pun-space-names (syntax? (attribute pun-space))
-                 'require-metavariables (syntax? (attribute require-meta))
-                 'check-metavariables (syntax? (attribute check-meta))
-                 'match-mode (attribute mm.mm)
-                 'equality-mode (attribute em.em)
-                 'addr-space (and (attribute space) (syntax-e #'space))
-                 'include-pattern-namespace (syntax? (attribute pattern-namespace)))))
+           #:do [(define base-ops
+                   (if lang
+                       (Language-options lang)
+                       (hash)))
+                 (define (do-op h . kvs)
+                   (let rec ([h h] [kvs kvs])
+                     (match kvs
+                       ['() h]
+                       [(list-rest k v kvs)
+                        (rec (if v (hash-set h k v) h) kvs)]
+                       [_ (error 'Lang-options-cls "internal error, odd kvs list: ~a" kvs)])))
+                 (define ops
+                   (do-op base-ops
+                          'pun-space-names (syntax? (attribute pun-space))
+                          'require-metavariables (syntax? (attribute require-meta))
+                          'check-metavariables (syntax? (attribute check-meta))
+                          'match-mode (attribute mm.mm)
+                          'equality-mode (attribute em.em)
+                          'addr-space (and (attribute space) (syntax-e #'space))
+                          'include-pattern-namespace (syntax? (attribute pattern-namespace))))
+                 (define L
+                   (match lang
+                     [(Language _ ES US oUS E<: meta-table u-info)
+                      (Language ops ES US oUS E<: meta-table u-info)]
+                     [_ #f]))]
+           #:attr options ops
+           #:attr op-lang L))
 
 (define-syntax-class Language-externals/user-ids
   #:attributes (external-spaces
@@ -681,57 +721,67 @@ Turn all free non-metavariables into external space names if they are bound.
              (or (check t-dom)
                  (check t-rng))])))))
 
-;; Check that all occurrences of #:externalize are not in a union.
-(define (check-externalized stx)
-  (for ([ty (in-hash-values (Language-user-spaces (current-language)))])
-    (define sy (any-union-contains-externalized? ty))
-    (when sy
-      (raise-syntax-error sy (format "Cannot have externalized type in a union: ~a" ty) stx))))
+;; TODO: sanity check that maps/sets that are "externalized" can't
+;; be self-referential without an intermediate variant construction.
+;; Possibly add trust tag, but ensure all types in mutual reference have
+;; the same level of trust.
+(define (check-externalized stx alst)
+  (void))
 
 (define (sset-map f s) (for/set ([u (in-set s)]) (f u)))
 
-(define (parse-language stx)
+(define (parse-language stx [extending #f])
   (syntax-parse stx
-    [(ops:Lang-options-cls . rest)
+    [((~optional (~seq #:extending extb:id))
+      (~do (define lang (and (syntax? (attribute extb)) (syntax-local-value #'extb))))
+      (~fail #:unless (implies (syntax? (attribute extb)) (Language? lang))
+             (format "Value bound to ~a is not a Language value. Given ~a"
+                     (syntax-e #'extb) lang))
+      (~fail #:when (and extending lang)
+             "Cannot explicitly give a base language ot parse-language and an #:extending form.")
+      (~do (define ext (or extending lang)))
+      (~var ops (Lang-options-cls ext))
+      . rest)
      (syntax-parse #'rest
        [gather:Language-externals/user-ids
+        ;; TODO: override/extend user classes in (or extending lang)
         (syntax-parse #'rest
           [((~or (~var usr (User-cls (attribute ops.options)
                                      (sset-map syntax-e (attribute gather.unames))
                                      (sset-map syntax-e (attribute gather.enames))
                                      (attribute gather.meta-table)
-                                     (attribute gather.uspace-info)))
+                                     (attribute gather.uspace-info)
+                                     ext))
                  :External-shape) ...)
-           (define pre-Γ
+           (define local-dict
              (for/list ([space (in-list (attribute usr.name))]
                         [ty (in-list (attribute usr.ty))])
              (cons (syntax-e space) ty)))
-           (parameterize ([current-language (Language #f
-                                                      (attribute gather.external-spaces)
-                                                      #f
-                                                      (make-hasheq pre-Γ)
-                                                      pre-Γ
-                                                      #f
-                                                      #f)])
-             (check-externalized stx))
-           #;
-           (define level-names
-             (produce-unfold-names pre-Γ (attribute gather.uspace-info)))
-           #;
-           (define unfolded
-             (for/hash ([(n ty) (in-hash pre-Γ)])
-               (values n (perform-unfolds level-names ty))))
-           ;; TODO
+           (define pre-Γ
+             (if ext
+                 (let ([h (make-hasheq pre-Γ)]
+                       [eh (Language-user-spaces ext)])
+                   (append
+                    (for/list ([(name ty) (in-dict (Language-ordered-us ext))])
+                      (cons name (hash-ref h name ty)))
+                    (for/list ([pair (in-list local-dict)]
+                               ;; not already pulled in as a rewrite?
+                               #:unless (hash-has-key? eh (car pair)))
+                      pair)))
+                 local-dict))
+           (check-externalized stx pre-Γ)
+           ;; TODO: make sure unioned types aren't vaguely shaped,
+           ;; make sure recursion (named or anonymous) is guarded.
            (define categorized-and-guarded
                    pre-Γ)
            (Language
-            (attribute ops.options)
-            (attribute gather.external-spaces)
-            ∅ ;; TODO: syntax for E<:
+            (attribute ops.options) ;; extended already
+            (attribute gather.external-spaces) ;; TODO: extend ext
             (make-hasheq categorized-and-guarded)
             categorized-and-guarded
-            (attribute gather.meta-table)
-            (attribute gather.uspace-info))])])]))
+            ∅ ;; TODO: syntax for E<:
+            (attribute gather.meta-table) ;; TODO: extend ext, check no cross-talk
+            (attribute gather.uspace-info))])])])) ;; TODO: extend ext
 
 (define (parse-reduction-relation stx [L (current-language)])
   (syntax-parse stx
@@ -740,16 +790,17 @@ Turn all free non-metavariables into external space names if they are bound.
 (define (parse-metafunction stx [L (current-language)])
   (syntax-parse stx
     [(name:id (~datum :)
-              (~do (define unames (hash-key-set (Language-user-spaces L)))
+              (~do (define options (Language-options L))
+                   (define unames (hash-key-set (Language-user-spaces L)))
                    (define enames (hash-key-set (Language-external-spaces L)))
                    (define meta-table (Language-meta-table L)))
               (~and
                (~seq arrty ...)
                (~seq
                 (~optional (~seq (~or #:Λ #:∀ #:all) (ta:id ...)))
-                (~var formals (TopPreType unames enames meta-table))
+                (~var formals (TopPreType options unames enames meta-table))
                 ... (~or (~datum ->) (~datum →))
-                (~var ret (TopPreType unames enames meta-table))))
+                (~var ret (TopPreType options unames enames meta-table))))
               (~var r (Rule-cls #f L)) ...)
      (define type-names (rev-map syntax-e (attribute ta)))
      ;; TODO: check that rules' patterns match (name args ...) for the type of name.

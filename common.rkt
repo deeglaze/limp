@@ -29,8 +29,8 @@
 
 (define-for/do for/append for/fold '() append)
 
-(define (hash-hash-add! h k k2 v)
-  (hash-set! h k (hash-set! (hash-ref! h k make-hash) k2 v)))
+(define (hash-union! h k s) (hash-set! h k (set-union (hash-ref h k ∅) s)))
+(define (hash-add! h k v) (set-add! (hash-ref! h k mutable-set) v))
 
 (define (hash-key-set h) (for/set ([k (in-hash-keys h)]) k))
 
@@ -39,6 +39,11 @@
     (match l
       ['() acc]
       [(cons x l) (rec l (cons (f x) acc))])))
+
+(define (rev-append r l)
+  (match r
+    ['() l]
+    [(cons r rs) (rev-append rs (cons r l))]))
 
 ;; symbol->keyword
 (define (s->k s) (string->keyword (symbol->string s)))
