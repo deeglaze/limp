@@ -791,6 +791,16 @@
       [(cons τ τs) (rec τs (type-join τ acc))]))
   (rec τs T⊥))
 
+(define (heapify-upcast τ σ)
+  (match* (τ σ)
+    ;; Fill in address details if already heapified
+    [((THeap: sy0 taddr0 tag0 τ*) (THeap: sy1 taddr1 tag1 _))
+     (mk-THeap sy0 (type-join taddr0 taddr1) (⊔tag tag0 tag1) τ*)]
+    ;; Not heapified. Upcast.
+    [(_ (THeap: sy taddr tag _)) (mk-THeap sy τ taddr tag)]
+    ;; No heapification. No upcast.
+    [(_ _) τ]))
+
 (define (type-meet τ σ)
   ;; potentially creates several equal but differently named types.
   (define us (Language-user-spaces (current-language)))
@@ -811,8 +821,8 @@
    (cond
     [(and (TError? τ) (TError? σ))
      (TError (append (TError-msgs τ) (TError-msgs σ)))]
-    [(<:? τ σ ρ) τ]
-    [(<:? σ τ ρ) σ]
+    [(<:? τ σ ρ) (heapify-upcast τ σ)]
+    [(<:? σ τ ρ) (heapify-upcast σ τ)]
     [else
      (match* (τ σ)
        [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
@@ -872,9 +882,10 @@
          (match (⊓ taddr0 taddr1 ρ)
            [(? TAddr? ta)
             (define inner (⊓ τ σ ρ))
-            (if (T⊥? inner)
+            (define tag (⊔tag tag0 tag1))
+            (if (or (T⊥? inner) (unmapped? tag))
                 T⊥ ;; XXX: don't heap-allocate bottom?
-                (mk-THeap #f ta (or tag0 tag1) inner))] ;; XXX: is left-bias bad here?
+                (mk-THeap #f ta tag inner))]
            [(? T⊥?) T⊥]
            [bad (error 'type-meet "Non-TAddr meet? ~a ~a => ~a" taddr0 taddr1 bad)])]
        [((THeap: _ taddr tag τ) (not (? THeap? σ)))

@@ -72,7 +72,7 @@
        (hash-union! sh tag to-alloc))]
 
     ;; Everything else structural
-    [(EStore-lookup _ _ e _)
+    [(EStore-lookup _ _ e _ _)
      (self e)]
 
     [(ELet _ _ bus body)

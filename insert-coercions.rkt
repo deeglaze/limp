@@ -1,5 +1,6 @@
 #lang racket/base
 (require racket/match
+         racket/trace
          "common.rkt"
          "language.rkt"
          "tast.rkt"
@@ -33,17 +34,26 @@
         pat]
        [_ (error 'coerce-pattern "Unsupported pattern: ~a" pat)])]))
 
-(define (do-deref e)
+(define (do-deref e [lm #f])
   (define ct (Typed-ct e))
   (match ct
+    ;; Unanticipated. TODO: Remove this eventually
     [(Deref taddr ct)
      (define ct* (deheapify-ct ct))
-     (unless (TAddr? taddr) (error 'do-deref "WTF ~a" taddr))
      (EStore-lookup (with-stx-stx e)
-                    (to-cast ct*) ;; Doesn't need to be stored.
-                    (expr-replace-ct (Check taddr) e)
-                    (get-option 'lm))]
-    [_ #f]))
+                       (to-cast ct*) ;; Doesn't need to be stored.
+                       (expr-replace-ct (Check taddr) e)
+                       (or lm (get-option 'lm))
+                       #f)]
+    [_
+     (match e
+       ;; The expression anticipated a lookup
+       [(EStore-lookup sy _ k lm #t)
+        (define k* (do-deref k lm))
+        (unless k*
+          (error 'do-deref "Implicit lookup did not have downcast. Impossible? ~a" e))
+        k*]
+       [_ #f])]))
 
 (define (do-store e)
   (define ct (Typed-ct e))
@@ -72,8 +82,13 @@
   (if e*
       (coerce-expr e*)
       (or (do-store e)
-          ;; Structurally coerce
           (match e
+            ;; 
+            [(EStore-lookup sy ct k lm imp)
+             (when imp
+               (error 'coerce-expr "Implicit lookup should be handled by do-deref: ~a" e))
+             (EStore-lookup sy ct (coerce-expr k) lm #f)]
+            ;; Structurally coerce
             [(EVariant sy ct n tag τs es)
              (EVariant sy ct n tag τs (map coerce-expr es))]
             [(EExtend sy ct m tag k v)
@@ -85,7 +100,6 @@
                        (map coerce-expr es))]
 
             [(ECall sy ct mf τs es) (ECall sy ct mf τs (map coerce-expr es))]
-            [(EStore-lookup sy ct k lm) (EStore-lookup sy ct (coerce-expr k) lm)]
             [(ELet sy ct bus body) (ELet sy ct (map coerce-bu bus) (coerce-expr body))]
             [(EMatch sy ct de rules) (EMatch sy ct (coerce-expr de) (map coerce-rule rules))]
             [(ESet-union sy ct es) (ESet-union sy ct (map coerce-rule es))]

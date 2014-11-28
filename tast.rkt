@@ -237,7 +237,7 @@ term template
         [(ECall _ _ mf τs es) `(,mf . ,(map rec es))]
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
-        [(EStore-lookup _ _ k lm) `(#:lookup ,(rec k) ,(s->k lm))]
+        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(s->k lm) ,@(if imp '(#:implicit) '()))]
         [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
          `(#:alloc ,@(do-tag tag) ,space ,(s->k mm) ,(s->k em))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
@@ -266,7 +266,7 @@ term template
     [(ECall sy _ mf τs es) (ECall sy ct mf τs es)]
     [(EVariant sy _ n tag τs es) (EVariant sy ct n tag τs es)]
     [(ERef sy _ x) (ERef sy ct x)]
-    [(EStore-lookup sy _ k lm) (EStore-lookup sy ct k lm)]
+    [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct k lm imp)]
     [(EAlloc sy _ tag) (EAlloc sy ct tag)]
     [(ELet sy _ bus body) (ELet sy ct bus body)]
     [(EMatch sy _ de rules) (EMatch sy ct de rules)]
@@ -292,7 +292,9 @@ term template
 (struct ECall Expression (mf τs es) #:transparent)
 (struct EVariant Expression (n tag τs es) #:transparent)
 (struct ERef Expression (x) #:transparent)
-(struct EStore-lookup Expression (k lm) #:transparent) ;; lm ::= 'resolve | 'delay | 'deref
+;; lm ::= 'resolve | 'delay | 'deref
+;; An implicit store lookup is k pre-heapification, and the lookup post-
+(struct EStore-lookup Expression (k lm implicit?) #:transparent)
 ;; TODO: add a "ghost" store lookup that is identity concretely,
 ;;       but expects to need a deref in the transform.
 ;;       It exists to change the default deref behavior.
@@ -320,7 +322,7 @@ expr template
     [(ECall sy ct mf τs es) ???]
     [(EVariant sy ct n tag τs es) ???]
     [(ERef sy ct x) ???]
-    [(EStore-lookup sy ct k lm) ???]
+    [(EStore-lookup sy ct k lm imp) ???]
     [(EAlloc sy ct tag) ???]
     [(ELet sy ct bus body) ???]
     [(EMatch sy ct de rules) ???]
@@ -356,8 +358,8 @@ expr template
     [((ERef _ ct x) (ERef _ ct y))
      (eq? (hash-ref ρ0 x x)
           (hash-ref ρ1 y y))]
-    [((EStore-lookup _ ct k0 lm)
-      (EStore-lookup _ ct k1 lm))
+    [((EStore-lookup _ ct k0 lm imp)
+      (EStore-lookup _ ct k1 lm imp))
      (expr-α-equal? k0 k1 ρ0 ρ1)]
     [((EAlloc _ ct tag) (EAlloc _ ct tag)) #t]
     [((ELet _ ct bus0 body0) (ELet _ ct bus1 body1))
@@ -611,7 +613,7 @@ expr template
       [(EVariant sy _ n tag τs es)
        (EVariant sy ct* n tag (abstract-freess τs names) (map self es))]
       [(ERef sy _ x) (ERef sy ct* x)]
-      [(EStore-lookup sy _ k lm) (EStore-lookup sy ct* (self k) lm)]
+      [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
       [(ELet sy _ bus body) (ELet sy ct* (abstract-frees-in-bus bus names) (self body))]
       [(EMatch sy _ de rules) (EMatch sy ct* (self de) (abstract-frees-in-rules-aux rules names))]
@@ -639,7 +641,7 @@ expr template
       [(EVariant sy _ n tag τs es)
        (EVariant sy ct* n tag (open-scopess τs names) (map self es))]
       [(ERef sy _ x) (ERef sy ct* x)]
-      [(EStore-lookup sy _ k lm) (EStore-lookup sy ct* (self k) lm)]
+      [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
       [(ELet sy _ bus body) (ELet sy ct* (open-scopes-in-bus bus names) (self body))]
       [(EMatch sy _ de rules) (EMatch sy ct* (self de) (open-scopes-in-rules-aux rules names))]

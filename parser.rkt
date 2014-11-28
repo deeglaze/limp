@@ -396,10 +396,11 @@ single address space
                            (syntax-e #'f)
                            (or (attribute ts.t) '())
                            (attribute es.e)))
-  (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)))
+  (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode) (~optional (~and #:implicit implicit))))
            #:attr e (EStore-lookup #'sy ct
                                    (attribute ek.e)
-                                   (or (attribute mode.lm) (get-option 'lm L))))
+                                   (or (attribute mode.lm) (get-option 'lm #:use L))
+                                   (syntax? (attribute implicit))))
   (pattern (~and sy (#:alloc (~var ops (EM-Modes (Language-options L) #t #t))))
            #:attr e (EAlloc #'sy
                             (or ct ;; FIXME: same as above

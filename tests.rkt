@@ -8,7 +8,6 @@
          syntax/parse
          "alloc-rules.rkt"
          "common.rkt"
-         "conservative.rkt"
          "insert-coercions.rkt"
          "language.rkt"
          "mkv.rkt"
@@ -154,7 +153,8 @@
       (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
       (parameterize ([instantiations (make-hash)])
         (define-values (CEK* metafunctions*)
-          (tc-language CEK '() Sτ))     ;  (pretty-print CEK*)
+          (parameterize ([check-for-heapification? #t])
+            (tc-language CEK '() Sτ)))  ;  (pretty-print CEK*)
 
         (pretty-print CEK*)
         (report-all-errors CEK*)

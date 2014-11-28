@@ -13,9 +13,9 @@
          tc-language
          tc-metafunctions
          report-all-errors
-         ignore-checks?)
+         check-for-heapification?)
 
-(define ignore-checks? (make-parameter #f))
+(define check-for-heapification? (make-parameter #f))
 
 ;; TODO: syntax location tracking and reporting
 (define ((unbound-mf sy who f))
@@ -63,7 +63,8 @@
             [(THeap: sy taddr tag τ*)
              (cond
               [(<:? τ* expect)
-               (Deref taddr (or ct (Check (retag-THeap τ expect theap-tag))))]
+               ;; The tag doesn't matter since it's being deref'd and not allocated.
+               (Deref taddr (or ct (Check τ)))]
               (bad))]
             [_ (bad)]))]
      [else (or ct (Check τ))]))
@@ -71,7 +72,7 @@
     [(Cast σ) ;; XXX: what do we do with casts that must be heapified?
      (define ct* (cast-to τ σ))
      (sub-t 'A (πct ct*) ct*)]
-    [(Check σ) #:when (not (ignore-checks?))
+    [(Check σ)
      (cond
       [(<:? τ σ) (sub-t 'B τ #f)]
       [else (type-error "Expect ~a to be a subtype of ~a" τ σ)])]
@@ -92,7 +93,7 @@
         ct))
   (match ct
     [(Cast σ) (chk (cast-to τ σ))]
-    [(Check σ) #:when (not (ignore-checks?))
+    [(Check σ)
      (cond
       [(<:? τ σ) (chk (Check σ))]
       [else
@@ -435,15 +436,29 @@
         [(ERef sy _ x)
          (ERef sy (chk (hash-ref Γ x (unbound-pat-var sy 'tc-expr x))) x)]
       
-        [(EStore-lookup sy _ k lm)
-         (define k* (tc-expr* k #f (cons 'lookup path)))
-         ;; We expect k to be a TAddr type, but which kind doesn't matter
-         (EStore-lookup
-          sy
-          (if (TAddr? (resolve (πcc k*))) ;; TODO: implicit store lookup form also checks `THeap?`
-              (chk T⊤)
-              (type-error "Expect store lookup key to have an address type, got ~a" (πcc k*)))
-          k* lm)]
+        [(EStore-lookup sy _ k lm imp)
+         ;; k has an expected type if this is an implicit lookup
+         (define k* (tc-expr* k (and imp expected) (cons 'lookup path)))
+         (define ct*
+           (cond
+            [imp
+             (cond
+              [(check-for-heapification?)
+               (define kct (Typed-ct k*))
+               (define kτ (πct kct))
+               (if (and (Deref? kct) (THeap? kτ))
+                   (Cast (THeap-τ kτ))
+                   (type-error "Implicit lookup did not have a downcast from #:heapify: ~a" 
+                               kct))]
+              [else ;; Not checking for heapification, so ignore that this is a lookup form.
+               (EStore-lookup sy (Typed-ct k*) k* lm imp)])]
+            ;; Explicit lookup means we expect k to be a TAddr type,
+            ;; but which kind doesn't matter
+            [(TAddr? (resolve (πcc k*)))
+             (chk T⊤)]
+            [else
+             (type-error "Expect store lookup key to have an address type, got ~a" (πcc k*))]))
+         (EStore-lookup sy ct* k* lm imp)]
       
         [(EAlloc sy _ tag)
          (EAlloc sy (project-check TAddr? "alloc" "address") (give-tag tag path))]
@@ -629,7 +644,7 @@
          (EVariant _ _ _ _ _ es)
          (ESet-union _ _ es))
      (for-each report-expression-errors es)]
-    [(EStore-lookup _ _ k _)
+    [(EStore-lookup _ _ k _ _)
      (report-expression-errors k)]
     [(ELet _ _ bus body)
      (for-each report-bu-errors bus)
