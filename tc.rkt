@@ -1,7 +1,9 @@
 #lang racket/base
 (require (for-syntax syntax/parse racket/syntax racket/base)
          (only-in racket/bool implies)
-         racket/list racket/match racket/set
+         racket/list racket/match 
+         racket/pretty
+         racket/set
          racket/string racket/trace
          "common.rkt" "language.rkt" "tast.rkt" "types.rkt")
 (provide tc-expr
@@ -39,24 +41,34 @@
       'x)))
   (check-equal? 2 (num-top-level-Λs ∀pair)))
 
-(define (coerce-check-expect ct expect τ)
+(define (retag-THeap τ expect theap-tag)
+  (if (THeap? expect)
+      (match expect
+        [(THeap: sy taddr tag _)
+         (mk-THeap sy taddr (or tag theap-tag) τ)]
+        [_ τ])
+      τ))
+
+(define (coerce-check-expect ct expect τ theap-tag)
   (define (sub-t who τ ct)
     (define (bad)
       (type-error "(~a) Expected ~a, got ~a" who expect τ))
     (cond
      [expect
       (if (<:? τ expect)
-          (or ct (Check τ))
+          (or ct
+              (Check (retag-THeap τ expect theap-tag)))
           (match τ
-            ;; We have a one-off that needs a dereference coercion
+            ;; We have a one-off downcast that needs a dereference coercion
             [(THeap: sy taddr tag τ*)
-             (if (<:? τ* expect)
-                 (Deref τ (or ct (Check τ)))
-                 (bad))]
+             (cond
+              [(<:? τ* expect)
+               (Deref taddr (or ct (Check (retag-THeap τ expect theap-tag))))]
+              (bad))]
             [_ (bad)]))]
      [else (or ct (Check τ))]))
   (match ct
-    [(Cast σ)
+    [(Cast σ) ;; XXX: what do we do with casts that must be heapified?
      (define ct* (cast-to τ σ))
      (sub-t 'A (πct ct*) ct*)]
     [(Check σ) #:when (not (ignore-checks?))
@@ -292,18 +304,21 @@
       (implicit-tag path)
       tag))
 
+(define (explicit-tag tag tail)
+  (and tag (not (implicit-tag? tag)) (cons tail tail)))
+
 ;; Γ : Variable names ↦ Type,
 ;; Ξ : metafunction names ↦ Type,
 ;; e : expr
 ;; Output is a fully annotated expression
 (define ((tc-expr Γ Ξ) e [expected #f] #:path [path '()])
-  (define (tc-expr* e expected path)
+  (define (tc-expr* e expected path #:tagged [tagged #f])
     (define ct (Typed-ct e))
     (cond
      [(Trust? ct) e]
      [else
       (define stx (with-stx-stx e))
-      (define (chk pre-τ) (coerce-check-expect ct expected pre-τ))
+      (define (chk pre-τ) (coerce-check-expect ct expected pre-τ (or tagged path)))
       (define (project-check pred form ty)
         (define σ
           (match ct
@@ -343,7 +358,7 @@
          (define renamed
            (cond
             [(and H (andmap mono-type? dom-σs) (mono-type? rng))
-             ;; TODO: recheck whole mf body to get the instantiations.
+             ;; We recheck whole mf body to get the instantiations.
              (define mf-mono (hash-ref! H mf make-hash))
              (define name* ((mono-namer) mf τs))
              (unless (hash-has-key? mf-mono name*)
@@ -378,7 +393,7 @@
              (for/list ([σ (in-list σs)]
                         [e (in-list es)]
                         [i (in-naturals)])
-               (tc-expr* e σ `((,n . ,i) . ,path))))
+               (tc-expr* e σ `((,n . ,i) . ,path) #:tagged (explicit-tag tag i))))
            (EVariant sy
                      (if (eq? tr 'bounded)
                          (type-error "Constructed a variant marked as bounded: ~a" n)
@@ -425,7 +440,7 @@
          ;; We expect k to be a TAddr type, but which kind doesn't matter
          (EStore-lookup
           sy
-          (if (TAddr? (πcc k*))
+          (if (TAddr? (resolve (πcc k*))) ;; TODO: implicit store lookup form also checks `THeap?`
               (chk T⊤)
               (type-error "Expect store lookup key to have an address type, got ~a" (πcc k*)))
           k* lm)]
@@ -450,11 +465,9 @@
              [(TMap: _ d r ext) (values d r ext)] ;; XXX: shouldn't be heapified?
              [_ (values #f #f 'dc)]))
          (define m* (tc-expr* m expected (cons 'extend-map path)))
-         (define k* (tc-expr* k d (cons 'extend-key path)))
-         (define v* (tc-expr* v r (cons 'extend-value path)))
-         ;; Can't use 'dc when we expect #t/#f since 'dc is higher in the lattice.
-         (EExtend sy 
-                  (chk (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) ext)))
+         (define k* (tc-expr* k d (cons 'extend-key path) #:tagged (explicit-tag tag 0)))
+         (define v* (tc-expr* v r (cons 'extend-value path) #:tagged (explicit-tag tag 1)))
+         (EExtend sy (chk (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) ext)))
                   m* (give-tag tag path) k* v*)]
 
         [(EEmpty-Map sy _) (EEmpty-Map sy (project-check TMap? "empty-map" "map"))]
@@ -476,7 +489,7 @@
          (define es*
            (for/list ([e (in-list es)]
                       [i (in-naturals 1)])
-             (tc-expr* e #f `((set-add . ,i) . ,path))))
+             (tc-expr* e #f `((set-add . ,i) . ,path) #:tagged (explicit-tag tag i))))
          (ESet-add sy
                    (chk
                     (for/fold ([τ (πcc e*)]) ([e (in-list es*)])

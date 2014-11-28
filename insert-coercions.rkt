@@ -37,7 +37,11 @@
   (define ct (Typed-ct e))
   (match ct
     [(Deref taddr ct)
-     (EStore-lookup (with-stx-stx e) ct (expr-replace-ct ct e)
+     (define ct* (deheapify-ct ct))
+     (unless (TAddr? taddr) (error 'do-deref "WTF ~a" taddr))
+     (EStore-lookup (with-stx-stx e)
+                    (to-cast ct*) ;; Doesn't need to be stored.
+                    (expr-replace-ct (Check taddr) e)
                     (get-option 'lm))]
     [_ #f]))
 
@@ -52,7 +56,7 @@
      (define x (gensym 'temp))
      (define a (gensym 'tempa))
      (ELet esy
-           (Trust τ)
+           ctaddr
            (list (Where esy
                         (PName esy cτ x)
                         (coerce-expr (expr-replace-ct (Check τ) e)))
@@ -63,16 +67,6 @@
            (ERef esy ctaddr a))]
     [_ #f]))
 
-
-;; Any heapified expression needs a good tag for allocation.
-(define (add-tag tag e)
-  (define e* (or (do-deref e) e))
-  (define ct (Typed-ct e*))
-  (match (πct ct)
-    [(THeap: sy taddr _ τ)
-     (replace-ct (ct-replace-τ ct (mk-THeap sy taddr tag τ)) e*)]
-    [_ e]))
-
 (define (coerce-expr e)
   (define e* (do-deref e))
   (if e*
@@ -81,19 +75,14 @@
           ;; Structurally coerce
           (match e
             [(EVariant sy ct n tag τs es)
-             (EVariant sy ct n tag τs
-                       (for/list ([e (in-list es)]
-                                  [i (in-naturals)])
-                         (coerce-expr (add-tag (cons tag i) e))))]
+             (EVariant sy ct n tag τs (map coerce-expr es))]
             [(EExtend sy ct m tag k v)
              (EExtend sy ct (coerce-expr m) tag
-                      (coerce-expr (add-tag (cons tag 0) k))
-                      (coerce-expr (add-tag (cons tag 1) v)))]
+                      (coerce-expr k)
+                      (coerce-expr v))]
             [(ESet-add sy ct e tag es)
              (ESet-add sy ct (coerce-expr e) tag
-                       (for/list ([e (in-list es)]
-                                  [i (in-naturals)])
-                         (coerce-expr (add-tag (cons tag i) e))))]
+                       (map coerce-expr es))]
 
             [(ECall sy ct mf τs es) (ECall sy ct mf τs (map coerce-expr es))]
             [(EStore-lookup sy ct k lm) (EStore-lookup sy ct (coerce-expr k) lm)]

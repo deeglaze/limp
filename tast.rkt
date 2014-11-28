@@ -12,14 +12,6 @@ and semantics.
 (define πcc (match-lambda
              [(Typed _ ct) (πct ct)]
              [_ #f]))
-(define (ct-replace-τ ct τ)
-  (match ct
-    [(Cast _) (Cast τ)]
-    [(Check _) (Check τ)]
-    ;; If replacing a Deref, it's for inserting coercions,
-    ;; so we remove the deref at this point.
-    [(? Deref?) (error 'ct-replace-τ "Uh oh. Deref of THeap? ~a" ct)]
-    [(Trust _) (error 'ct-replace-τ "Noooo ~a ~a" ct τ)]))
 
 (define (replace-ct ct v)
   (cond [(Pattern? v) (pattern-replace-ct ct v)]
@@ -233,7 +225,11 @@ term template
 |#
 
 (define (expr->sexp e)
-  (define (do-tag tag) (if tag `(#:tag ,tag) '()))
+  (define (do-tag tag) 
+    ;; only show implicit tags in verbosity > 1
+    (if (and tag (or (> v 1) (not (implicit-tag? tag))))
+        `(#:tag ,tag)
+        '()))
   (define v (expr-print-verbosity))
   (let rec ([e e])
     (define sexp

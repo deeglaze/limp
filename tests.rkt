@@ -19,7 +19,7 @@
          "types.rkt")
 
 ;; If there are any time or space leaks, kill the tests.
-(with-limits 10 1024
+(with-limits 20 1024
  (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()] #:use-lang? [use-lang? #f])
    (define-values (unames* enames* meta-table*)
      (if use-lang?
@@ -53,9 +53,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-;(type-print-verbosity 2)
-;(pattern-print-verbosity 3)
-;(expr-print-verbosity 3)
+(type-print-verbosity 2)
+(pattern-print-verbosity 3)
+(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f

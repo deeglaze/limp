@@ -19,6 +19,27 @@
              [(or (Cast t) (Check t) (Trust t)) t]
              [(Deref _ ct) (πct ct)]
              [_ #f]))
+(define (ct-replace-τ ct τ)
+  (match ct
+    [(Cast _) (Cast τ)]
+    [(Check _) (Check τ)]
+    ;; If replacing a Deref, it's for inserting coercions,
+    ;; so we remove the deref at this point.
+    [(? Deref?) (error 'ct-replace-τ "Uh oh. Deref of THeap? ~a" ct)]
+    [(Trust _) (error 'ct-replace-τ "Noooo ~a ~a" ct τ)]))
+
+(define (deheapify-ct ct)
+  (match (πct ct)
+    [(THeap: _ _ _ τ) (ct-replace-τ ct τ)]
+    [_ ct]))
+(trace deheapify-ct)
+
+(define (to-cast ct)
+  (match ct
+    [(Check σ) (if (T⊤? σ) ct (Cast σ))]
+    [(? Cast?) ct]
+    [(? Trust?) (error 'to-cast "Shouldn't castify Trusted types: ~a" ct)]
+    [(? Deref?) (error 'to-cast "Impossible? ~a" ct)]))
 
 (define type-error-fn (make-parameter
                        (λ (fmt . args)
@@ -29,12 +50,15 @@
 (define type-print-verbosity (make-parameter 0))
 
 (define (as-named τ)
-  (define us (Language-ordered-us (current-language)))
-  (define clean (if (> (type-print-verbosity) 0)
-                    (λ (name) `(fold$ ,name))
-                    values))
-  (for/first ([(name σ) (in-pairs us)] #:when (equal? τ σ))
-    (clean name)))
+  (and (< (type-print-verbosity) 2)
+       (let ()
+         (define us (Language-ordered-us (current-language)))
+         (define clean
+           (if (= (type-print-verbosity) 1)
+               (λ (name) `(fold$ ,name))
+               values))
+         (for/first ([(name σ) (in-pairs us)] #:when (equal? τ σ))
+           (clean name)))))
 
 (define (type->sexp t)
   (define v (type-print-verbosity))
@@ -179,6 +203,15 @@
                          [(eq? b0 'bounded) b1]
                          [(eq? b1 'bounded) b0]
                          [else 'trusted]))
+
+(define (⊔tag tag0 tag1)
+              (cond
+               [(eq? tag0 'dc) (or tag1 tag0)]
+               [(eq? tag1 'dc) (or tag0 tag1)]
+               [(and tag0 tag1) (if (equal? tag0 tag1)
+                                    tag0
+                                    unmapped)]
+               [else (or tag0 tag1)]))
 
 (define generic-set (mk-TSet #f T⊤ 'dc))
 (define generic-map (mk-TMap #f T⊤ T⊤ 'dc))
@@ -604,7 +637,7 @@
                   (eq? rext 'dc))
           (seq A
                (<:?-aux A τk σk)
-               (<:?-aux A σv σv)))]
+               (<:?-aux A τv σv)))]
         [((TΛ: _ _ sτ) (TΛ: _ _ sσ))
          (define name (mk-TFree #f (gensym 'dummy)))
          (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
@@ -615,7 +648,16 @@
          (<:?-aux (grow-A) τ (resolve σ ρ))]
         ;; XXX: (NO?) Heap annotations are not directional for subtyping
         ;[((THeap: _ _ τ) σ) (<:?-aux A τ σ)]
-        [(τ (THeap: _ _ _ σ)) (<:?-aux A τ σ)]
+        [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
+         (and (or (not tag0)
+                  (eq? tag1 'dc)
+                  (equal? tag0 tag1))
+              (seq A
+                   (<:?-aux A taddr0 taddr1)
+                   (<:?-aux A τ σ)))]
+        [((? THeap?) (not (? THeap?))) #f] ;; No downcast
+        [((not (? THeap? τ)) (THeap: _ _ _ σ)) ;; Yes up
+         (<:?-aux A τ σ)]
         [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
          (and (for/and ([t (in-list ts)])
                 (<:?-aux A t σ))
@@ -660,6 +702,7 @@
     (cond
      [(and (TError? τ) (TError? σ))
       (TError (append (TError-msgs τ) (TError-msgs σ)))]
+     ;; If comparable, choose the larger type without allocating new type structure.
      [(<:? τ σ ρ) σ]
      [(<:? σ τ ρ) τ]
      [else
@@ -722,9 +765,11 @@
                                 (mk-THeap #f taddr1 tag1 σ))))
          (match (⊔ taddr0 taddr1 ρ)
            [(? TRUnion?) (both)]
-           [(? TAddr? ta) (if (equal? tag0 tag1)
-                              (mk-THeap #f ta tag0 (⊔ τ σ ρ))
-                              (both))]
+           [(? TAddr? ta)
+            (define tag (⊔tag tag0 tag1))
+            (if (unmapped? tag)
+                (both)
+                (mk-THeap #f ta tag (⊔ τ σ ρ)))]
            [bad (error 'type-join "Non-TAddr join? ~a ~a => ~a" taddr0 taddr1 bad)])]
         [((THeap: _ taddr tag τ) (not (? THeap? σ)))
          (mk-THeap #f taddr tag (⊔ τ σ ρ))]
@@ -738,6 +783,7 @@
              (mk-TAddr #f space mm em))]
         [(_ _) (*TRUnion #f (list τ σ))])]))
   (freeze (⊔ τ σ #hasheq())))
+
 (define (type-join* τs)
   (define (rec τs acc)
     (match τs
