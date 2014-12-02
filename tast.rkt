@@ -28,7 +28,6 @@ and semantics.
     [#f sexp]
     [(Check σ) `(#:ann ,(type->sexp σ) ,sexp)]
     [(Cast σ) `(#:cast ,(type->sexp σ) ,sexp)]
-    [(Trust σ) `(TRUST$ ,(type->sexp σ) ,sexp)]
     [(Deref taddr ct) `(#:after-deref ,(type->sexp taddr) ,(ann-wrap ct sexp))]
     [_ `(error$ 'ann-wrap ,(format "Bad ct: ~a" ct))]))
 
@@ -52,9 +51,11 @@ and semantics.
                                           ,(rec p))]
         [(PSet-with* _ _ v p) `(#:set-with* ,(rec v)
                                             ,(rec p))]
+        [(PDeref _ _ p imp) `(#:deref ,(rec p) ,@(if imp '(#:implicit) '()))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
         [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
-        [(PIsAddr _ (Cast (TAddr: _ space mm em))) `(#:is-addr ,space ,(s->k mm) ,(s->k em))]
+        [(PIsAddr _ (Cast (TAddr: _ space mm em)))
+         `(#:is-addr ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(PIsType _ (Cast τ)) `(#:is-type ,τ)] ;; printer will handle τ
         [_ `(error$ ,(format "Unsupported pattern: ~a" (struct->vector p)))]))
     (case v
@@ -94,7 +95,7 @@ and semantics.
 (struct PSet-with* Pattern (v p) #:transparent)
 (struct PTerm Pattern (t) #:transparent)
 ;; Expect an address always, so deref and continue matching.
-(struct PDeref Pattern (p) #:transparent)
+(struct PDeref Pattern (p implicit?) #:transparent)
 ;; The info is in the type
 (struct PIsExternal Pattern () #:transparent)
 (struct PIsAddr Pattern () #:transparent)
@@ -111,7 +112,7 @@ pattern template:
     [(PSet-with sy ct v p) ???]
     [(PSet-with* sy ct v p) ???]
     [(PTerm sy ct t) ???]
-    [(PDeref sy ct p) ???]
+    [(PDeref sy ct p imp?) ???]
     [(PIsExternal sy ct) ???]
     [(PIsAddr sy ct) ???]
     [(PIsType sy ct) ???]
@@ -154,7 +155,7 @@ pattern template:
     [((PSet-with* _ ct v0 p0) (PSet-with* _ ct v1 p1))
      (sequence-pattern-α-equal? (list v0 p0) (list v1 p1) ρ0 ρ1)]
     [((PTerm _ ct t0) (PTerm _ ct t1)) (values ρ0 ρ1 (term-α-equal? t0 t1))]
-    [((PDeref _ ct p0) (PDeref _ ct p1)) (pattern-α-equal? p0 p1)]
+    [((PDeref _ ct p0 imp) (PDeref _ ct p1 imp)) (pattern-α-equal? p0 p1)]
     [((PIsExternal _ ct) (PIsExternal _ ct)) (values ρ0 ρ1 #t)]
     [((PWild _ ct) (PWild _ ct)) (values ρ0 ρ1 #t)]
     [((PIsAddr _ ct) (PIsAddr _ ct)) (values ρ0 ρ1 #t)]
@@ -237,9 +238,9 @@ term template
         [(ECall _ _ mf τs es) `(,mf . ,(map rec es))]
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
-        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(s->k lm) ,@(if imp '(#:implicit) '()))]
+        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(and lm (s->k lm)) ,@(if imp '(#:implicit) '()))]
         [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
-         `(#:alloc ,@(do-tag tag) ,space ,(s->k mm) ,(s->k em))]
+         `(#:alloc ,@(do-tag tag) ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
         [(EMatch _ _ de rules) `(#:match ,(rec de) . ,(map (rule->sexp #f) rules))]
         [(EExtend _ _ m tag k v)
@@ -559,7 +560,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (abstract-frees-in-term t names))]
-      [(PDeref sy _ p) (PDeref sy ct* (self p))]
+      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]
@@ -578,7 +579,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t names))]
-      [(PDeref sy _ p) (PDeref sy ct* (self p))]
+      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]

@@ -89,7 +89,7 @@ single address space
        [else
         (mk-TFree x sym)]))
     (if taddr
-        (mk-THeap x taddr #f τ) ;; No tag in types.
+        (*THeap '->ref x taddr #f τ) ;; No tag in types.
         τ)))
 
 (define-splicing-syntax-class (formal-splicing options)
@@ -331,8 +331,10 @@ single address space
            #:when (mono-type? (attribute t.t))
            #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
                                         (Cast (attribute t.t)))))
-  (pattern (~and sy ((~var _ (pderef L)) (~optional (~seq #:space space:id)) p))
-           #:attr pat (PDeref #'sy ct (attribute p.pat)))
+  (pattern (~and sy ((~var _ (pderef L))
+                     (~or (~optional (~and #:implicit implicit))
+                          (~once p)) ...))
+           #:attr pat (PDeref #'sy ct (attribute p.pat) (syntax? (attribute implicit))))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))

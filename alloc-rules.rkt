@@ -7,8 +7,10 @@
          racket/dict
          racket/set
          racket/match
-         racket/pretty)
-(provide language->rules report-rules heapify-language)
+         racket/pretty
+         racket/trace)
+(provide language->rules report-rules heapify-language
+         normalize-taddr solidify-τ solidify-language)
 
 ;; ROUNDTOIT
 ;; Unfolding and subtyping has difficult interactions that I don't have time to mess with
@@ -147,7 +149,7 @@
   (define (heap-alloc sy t taddr)
     (match t
       [(? THeap?) t]
-      [(? heap-allocate?) (mk-THeap sy taddr 'dc t)]
+      [(? heap-allocate?) (mk-THeap sy taddr #f t)]
       [t (self t)]))
   (define (try-alloc? τ tr)
     (and (untrusted? tr)
@@ -197,6 +199,40 @@
                             heapify-nonrec?
                             ty))))
   ;; We use self-referential checks for heapification, just like expression allocation rules.
+  (struct-copy Language L
+               [user-spaces (make-hash ordered)]
+               [ordered-us ordered]))
+
+(define (normalize-taddr taddr)
+  (match-define (TAddr: sy space mm em) taddr)
+  (mk-TAddr sy
+            (or space (get-option 'addr-space))
+            (or mm (get-option 'mm))
+            (or em (get-option 'em))))
+
+;; Take off THeap annotations and just replace with the TAddr.
+(define (solidify-τ τ)
+  (match τ
+    [(THeap: _ taddr _ _) (normalize-taddr taddr)]
+    [(or (? TAddr?) (? TExternal?) (? TFree?) (? TName?) (? TBound?)) τ]
+    [(TVariant: sy n ts tr) (mk-TVariant sy n (map solidify-τ ts) tr)]
+    [(TMap: sy t-dom t-rng ext)
+     (mk-TMap sy (solidify-τ t-dom) (solidify-τ t-rng) ext)]
+    [(TSet: sy tv ext) (mk-TSet sy (solidify-τ tv) ext)]
+    [(Tμ: sy x (Scope t) tr n)
+     (mk-Tμ sy x (Scope (solidify-τ t)) tr n)]
+    [(TΛ: sy x (Scope t))
+     (mk-TΛ sy x (Scope (solidify-τ t)))]
+    [(TSUnion: sy ts) (*TSUnion sy (map solidify-τ ts))]
+    [(TRUnion: sy ts) (*TRUnion sy (map solidify-τ ts))]
+    [(TCut: sy t u) (mk-TCut sy (solidify-τ t) (solidify-τ u))]
+    [_ (error 'solidify-τ "Bad type ~a" τ)]))
+(trace solidify-τ)
+(define (solidify-language L)
+  (define us (Language-ordered-us L))
+  (define ordered
+    (for/list ([(name ty) (in-dict us)])
+      (cons name (solidify-τ ty))))
   (struct-copy Language L
                [user-spaces (make-hash ordered)]
                [ordered-us ordered]))

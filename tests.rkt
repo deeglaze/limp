@@ -18,7 +18,7 @@
          "types.rkt")
 
 ;; If there are any time or space leaks, kill the tests.
-(with-limits 20 1024
+(with-limits 40 1024
  (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()] #:use-lang? [use-lang? #f])
    (define-values (unames* enames* meta-table*)
      (if use-lang?
@@ -52,9 +52,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-(type-print-verbosity 2)
-(pattern-print-verbosity 3)
-(expr-print-verbosity 3)
+;(type-print-verbosity 2)
+;;(pattern-print-verbosity 3)
+;(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -91,7 +91,7 @@
  (parameterize ([current-language
                  (Language #hash() #hash() (make-hash us-test) us-test ∅ #hash() (make-hash))])
    (check-equal?
-    (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) 'dc)))
+    (apply set (lang-variants-of-arity (mk-TVariant #f 'foo (list T⊤ T⊤) #f)))
     (set (quantify-frees foo-x-y '(y x))
          (quantify-frees foo-a-list-a '(a)))
     "Simplified")
@@ -126,9 +126,9 @@
             (co κ (Clo y e ρ))]
      [#:--> #:name var-lookup
             (ev (#:and (#:has-type Name) x) ρ κ)
-            (co κ (#:map-lookup ρ x))]
+            (co κ (#:lookup (#:map-lookup ρ x) #:implicit))]
 
-     [#:--> (co (Cons (ar e ρ) κ) v)
+     [#:--> (co (Cons (ar e ρ) (#:deref κ #:implicit)) v)
             (ev e ρ (Cons (fn v) κ))]
      [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
             (ap z e ρ v κ)]
@@ -161,6 +161,8 @@
         (define-values (CEK2 metafunctions2)
           (coerce-language CEK* metafunctions*))
         (report-all-errors CEK2)
+        (displayln "Transformed")
+        (pretty-print (solidify-language (current-language)))
         (pretty-print CEK2))
       #|
       (define-values (CEK** mf*) (language->add-AU CEK* '()))

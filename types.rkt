@@ -13,10 +13,9 @@
 ;; Cast or Check annotations?
 (struct Cast (t) #:transparent)
 (struct Check (t) #:transparent)
-(struct Trust (t) #:transparent) ;; Only allowed from transformers.
 (struct Deref (taddr ct) #:transparent)
 (define πct (match-lambda
-             [(or (Cast t) (Check t) (Trust t)) t]
+             [(or (Cast t) (Check t)) t]
              [(Deref _ ct) (πct ct)]
              [_ #f]))
 (define (ct-replace-τ ct τ)
@@ -25,20 +24,12 @@
     [(Check _) (Check τ)]
     ;; If replacing a Deref, it's for inserting coercions,
     ;; so we remove the deref at this point.
-    [(? Deref?) (error 'ct-replace-τ "Uh oh. Deref of THeap? ~a" ct)]
-    [(Trust _) (error 'ct-replace-τ "Noooo ~a ~a" ct τ)]))
-
-(define (deheapify-ct ct)
-  (match (πct ct)
-    [(THeap: _ _ _ τ) (ct-replace-τ ct τ)]
-    [_ ct]))
-(trace deheapify-ct)
+    [(? Deref?) (error 'ct-replace-τ "Uh oh. Deref of THeap? ~a" ct)]))
 
 (define (to-cast ct)
   (match ct
     [(Check σ) (if (T⊤? σ) ct (Cast σ))]
     [(? Cast?) ct]
-    [(? Trust?) (error 'to-cast "Shouldn't castify Trusted types: ~a" ct)]
     [(? Deref?) (error 'to-cast "Impossible? ~a" ct)]))
 
 (define type-error-fn (make-parameter
@@ -95,7 +86,7 @@
           [(TCut: _ s u)
            `(#:inst ,(rec s) ,(rec u))]
           [(? T⊤?) '⊤]
-          [(TAddr: _ name mm em) `(Addr ,name ,(s->k mm) ,(s->k em))]
+          [(TAddr: _ name mm em) `(Addr ,name ,(and mm (s->k mm)) ,(and em (s->k em)))]
           [(TArrow: _ dom rng) `(#:-> ,(rec dom) ,(rec rng))]
           [(TBound: _ i) `(deb$ ,i)]
           ;; Non-types
@@ -172,51 +163,83 @@
 (struct TError (msgs) #:transparent
         #:methods gen:custom-write [(define write-proc write-type)])
 
+(define (*THeap who sy taddr tag τ)
+  (when (THeap? τ) (error '*THeap "~a: bad construction ~a" who (list sy taddr tag τ)))
+  (mk-THeap sy taddr tag τ))
+
 ;; Canonicalize ⊥s
 (define (*TVariant sy name ts tr)
   (if (ormap T⊥? ts)
       T⊥
       (mk-TVariant sy name ts tr)))
 
+(define vfff (list values #f #f #f))
+(define-match-expander Heapify:
+  (λ (stx)
+     (syntax-parse stx
+       [(_ hfy:id sy:expr taddr:expr tag:expr inner:expr)
+        #'(or (and (THeap: (and sy sy-v) (and taddr taddr-v) (and tag tag-v) inner)
+                   (app (λ _ (λ (v) (*THeap 'Heapify: sy-v taddr-v tag-v v))) hfy))
+              (and inner
+                   (app (λ _ vfff) (list hfy sy taddr tag))))]
+       [(_ hfy:id inner:expr)
+        #'(app (match-lambda
+                    [(THeap: sy taddr tag in)
+                     (list (λ (v) (*THeap 'Heapify: sy taddr tag v)) in)]
+                    [v (list values v)])
+               (list hfy inner))])))
+
 ;; A Trust-Tag is one of
 ;; - 'untrusted 
 ;; - 'bounded [only destructed]
 ;; - 'trusted [allowed to be constructed without heap-allocation]
 ;; trusted ⊏ bounded ⊏ untrusted
-;; A special "undefined" ('dc) that jumps up or down depending on join/meet is also allowed
+;; A special "undefined" (#f) that jumps up or down depending on join/meet is also allowed
 (define (untrusted? x) (eq? x 'untrusted))
 
-;; 'dc is bottom
-(define (⊔b b0 b1) (cond [(eq? b0 'dc) b1]
-                         [(eq? b1 'dc) b0]
+;; #f is bottom
+(define (⊔trust b0 b1) (cond [(not b0) b1]
+                         [(not b1) b0]
                          [(eq? b0 'trusted) b1]
                          [(eq? b1 'trusted) b0]
                          [(eq? b0 'bounded) b1]
                          [(eq? b1 'bounded) b0]
                          [else 'untrusted]))
 
-;; 'dc is top
-(define (⊓b b0 b1) (cond [(eq? b0 'dc) b1]
-                         [(eq? b1 'dc) b0]
-                         [(eq? b0 'untrusted) b1]
-                         [(eq? b1 'untrusted) b0]
-                         [(eq? b0 'bounded) b1]
-                         [(eq? b1 'bounded) b0]
-                         [else 'trusted]))
+;; #f is top
+(define (⊓trust b0 b1)
+  (cond [(not b0) b1]
+        [(not b1) b0]
+        [(eq? b0 'untrusted) b1]
+        [(eq? b1 'untrusted) b0]
+        [(eq? b0 'bounded) b1]
+        [(eq? b1 'bounded) b0]
+        [else 'trusted]))
 
-(define (⊔tag tag0 tag1)
-              (cond
-               [(eq? tag0 'dc) (or tag1 tag0)]
-               [(eq? tag1 'dc) (or tag0 tag1)]
-               [(and tag0 tag1) (if (equal? tag0 tag1)
-                                    tag0
-                                    unmapped)]
-               [else (or tag0 tag1)]))
+(define (⊔b e0 e1)
+  (cond [(eq? e0 'dc) e1]
+        [(eq? e1 'dc) e0]
+        [else (or e0 e1)]))
+
+(define (⊓b e0 e1)
+  (cond [(eq? e0 'dc) e1]
+        [(eq? e1 'dc) e0]
+        [else (and e0 e1)]))
+
+(define (⋈flat f0 f1)
+  ;; Debugging assertion
+  (when (or (eq? f0 'dc) (eq? f1 'dc))
+    (error '⋈flat "'dc not bottom for flat non-boolean elements: ~a, ~a" f0 f1))
+  (cond
+   [(and f0 f1) (if (equal? f0 f1)
+                    f0
+                    unmapped)]
+   [else (or f0 f1)]))
 
 (define generic-set (mk-TSet #f T⊤ 'dc))
 (define generic-map (mk-TMap #f T⊤ T⊤ 'dc))
 (define (generic-variant n arity)
-  (mk-TVariant #f n (make-list arity T⊤) 'dc))
+  (mk-TVariant #f n (make-list arity T⊤) #f))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Binding/naming operations
@@ -230,9 +253,9 @@
 (define (combine-THeap sy taddr tag σ)
   (match σ
     [(THeap: _ taddr* tag* τ*)
-     (type-join (mk-THeap sy tag taddr τ*)
-                (mk-THeap sy tag taddr* τ*))]
-    [τ* (mk-THeap sy taddr tag τ*)]))
+     (type-join (*THeap 'combine0 sy tag taddr τ*)
+                (*THeap 'combine1 sy tag taddr* τ*))]
+    [τ* (*THeap 'combine0 sy taddr tag τ*)]))
 
 (define (open-scope-aux t* i t)
   (let open ([t* t*] [i i])
@@ -296,7 +319,7 @@
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
       [(TUnif τ) (open* τ)]
-      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (open* τ))]
+      [(THeap: sy taddr tag τ) (*THeap 'open-scope-hygienically sy taddr tag (open* τ))]
       [_ (error 'open "Bad type ~a" t*)])))
  
 (define (subst-name t name s)
@@ -345,7 +368,7 @@
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
       [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
-      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (abs* τ))]
+      [(THeap: sy taddr tag τ) (*THeap 'abstract-free sy taddr tag (abs* τ))]
       [_ (error 'abstract-free "Bad type ~a" t)])))
 
 (define (abstract-free t name [taddr* #f])
@@ -366,7 +389,7 @@
     [(TVariant: sy name ts tr) (*TVariant sy name (map freeze ts) tr)]
     [(TMap: sy t-dom t-rng ext) (mk-TMap sy (freeze t-dom) (freeze t-rng) ext)]
     [(TSet: sy t ext) (mk-TSet sy (freeze t) ext)]
-    [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (freeze τ))]
+    [(THeap: sy taddr tag τ) (*THeap 'freeze sy taddr tag (freeze τ))]
     [_ (error 'freeze "Bad type ~a" t)]))
 
 (define ff (cons #f #f))
@@ -588,7 +611,7 @@
                 (reset (open-scope st u))]
                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
             [(TUnif τ) (reset τ)]
-            [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (reset τ))]
+            [(THeap: sy taddr tag τ) (*THeap 'resolve sy taddr tag (reset τ))]
             [_ t])
           (error 'resolve "Circular reference: ~a" orig)))))
 
@@ -618,7 +641,7 @@
         [(_ (? T⊤?)) A]
         [((? T⊥?) _) A]
         [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
-         #:when (and (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1)))
+         #:when (implies (and tr0 tr1) (equal? tr0 tr1))
          (let each ([A (grow-A)] [τs τs] [σs σs])
            (match* (τs σs)
              [('() '()) A]
@@ -649,9 +672,7 @@
         ;; XXX: (NO?) Heap annotations are not directional for subtyping
         ;[((THeap: _ _ τ) σ) (<:?-aux A τ σ)]
         [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
-         (and (or (not tag0)
-                  (eq? tag1 'dc)
-                  (equal? tag0 tag1))
+         (and (not (unmapped? (⋈flat tag0 tag1)))
               (seq A
                    (<:?-aux A taddr0 taddr1)
                    (<:?-aux A τ σ)))]
@@ -666,9 +687,10 @@
          (and (for/or ([σ (in-list σs)])
                 (<:?-aux A τ σ))
               A)]
-        [((TAddr: _ space mm0 em0) (TAddr: _ space mm1 em1))
-         (and (not (or (eq? 'default (mode-comb mm0 mm1))
-                       (eq? 'default (mode-comb em0 em1))))
+        [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
+         (and (not (or (unmapped? (⋈flat space0 space1))
+                       (unmapped? (⋈flat mm0 mm1))
+                       (unmapped? (⋈flat em0 em1))))
               A)]
         [(_ _) #f])]))
   (<:?-aux A τ σ))
@@ -709,13 +731,11 @@
       (match* (τ σ)
         [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
          #:when (and (= (length τs) (length σs))
-                     (or (eq? tr0 'dc)
-                         (eq? tr1 'dc)
-                         (equal? tr0 tr1)))
+                     (implies (and tr0 tr1) (equal? tr0 tr1)))
          (mk-TVariant #f n (for/list ([τ (in-list τs)]
                                    [σ (in-list σs)])
                           (⊔ τ σ ρ))
-                      (⊔b tr1 tr0))]
+                      (⊔trust tr1 tr0))]
         ;; Make Λs agree on a name and abstract the result.
         [((TΛ: _ x st) (TΛ: _ _ ss))
          (define fresh (gensym 'joinΛ))
@@ -751,7 +771,7 @@
          (define tv (mk-TFree #f fresh))
          (mk-Tμ #f x
                 (abstract-free (⊔ (open-scope sτ tv) (open-scope sσ tv) ρ) fresh)
-                (⊔b ftr ttr)
+                (⊔trust ftr ttr)
                 (min fn tn))]
         ;; Named types are like recursive types, but trickier to get the name agreement right.
         [((TName: _ x) _) (join-named x σ)]
@@ -761,24 +781,25 @@
         ;; Maintain invariant that heap allocation annotations are only one deep.
         [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
          (define (both)
-           (mk-TRUnion #f (list (mk-THeap #f taddr0 tag0 τ)
-                                (mk-THeap #f taddr1 tag1 σ))))
+           (mk-TRUnion #f (list (*THeap 'join-theap0 #f taddr0 tag0 τ)
+                                (*THeap 'join-theap1 #f taddr1 tag1 σ))))
          (match (⊔ taddr0 taddr1 ρ)
            [(? TRUnion?) (both)]
            [(? TAddr? ta)
-            (define tag (⊔tag tag0 tag1))
+            (define tag (⋈flat tag0 tag1))
             (if (unmapped? tag)
                 (both)
-                (mk-THeap #f ta tag (⊔ τ σ ρ)))]
+                (*THeap 'join-theap #f ta tag (⊔ τ σ ρ)))]
            [bad (error 'type-join "Non-TAddr join? ~a ~a => ~a" taddr0 taddr1 bad)])]
         [((THeap: _ taddr tag τ) (not (? THeap? σ)))
-         (mk-THeap #f taddr tag (⊔ τ σ ρ))]
+         (*THeap 'join-left #f taddr tag (⊔ τ σ ρ))]
         [((not (? THeap? τ)) (THeap: _ taddr tag σ))
-         (mk-THeap #f taddr tag (⊔ τ σ ρ))]
-        [((TAddr: _ space mm0 em0) (TAddr: _ space mm1 em1))
-         (define mm (mode-comb mm0 mm1))
-         (define em (mode-comb em0 em1))
-         (if (or (eq? mm 'default) (eq? em 'default))
+         (*THeap 'join-right #f taddr tag (⊔ τ σ ρ))]
+        [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
+         (define space (⋈flat space0 space1))
+         (define mm (⋈flat mm0 mm1))
+         (define em (⋈flat em0 em1))
+         (if (or (unmapped? space) (unmapped? mm) (unmapped? em))
              (*TRUnion #f (list τ σ))
              (mk-TAddr #f space mm em))]
         [(_ _) (*TRUnion #f (list τ σ))])]))
@@ -795,9 +816,11 @@
   (match* (τ σ)
     ;; Fill in address details if already heapified
     [((THeap: sy0 taddr0 tag0 τ*) (THeap: sy1 taddr1 tag1 _))
-     (mk-THeap sy0 (type-join taddr0 taddr1) (⊔tag tag0 tag1) τ*)]
+     (define tag (⋈flat tag0 tag1))
+     (when (unmapped? tag) (error 'heapify-upcast "Tags not consonant ~a, ~a" tag0 tag1))
+     (*THeap 'upcast0 sy0 (type-join taddr0 taddr1) tag τ*)]
     ;; Not heapified. Upcast.
-    [(_ (THeap: sy taddr tag _)) (mk-THeap sy τ taddr tag)]
+    [(τ (THeap: sy taddr tag _)) (*THeap 'upcast1 sy τ taddr tag)]
     ;; No heapification. No upcast.
     [(_ _) τ]))
 
@@ -827,11 +850,13 @@
      (match* (τ σ)
        [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
         #:when (and (= (length τs) (length σs))
-                    (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1)))
+                    (let ([r  (implies (and tr0 tr1) (equal? tr0 tr1))])
+                      (printf "Trust ~a ~a ~a~%" tr0 tr1 r)
+                      r))
         (*TVariant #f n (for/list ([τ (in-list τs)]
                                    [σ (in-list σs)])
                             (⊓ τ σ ρ))
-                     (⊓b tr1 tr0))]
+                     (⊓trust tr1 tr0))]
        ;; Make Λs agree on a name and abstract the result.
        [((TΛ: _ x st) (TΛ: _ _ ss))
         (define fresh (gensym 'joinΛ))
@@ -871,7 +896,7 @@
                  (open-scope sσ tv)
                  ρ)
                 fresh)
-               (⊓b ftr ttr)
+               (⊓trust ftr ttr)
                (min fn tn))]
        ;; Named types are like recursive types, but trickier to get the name agreement right.
        [((TName: _ x) _) (meet-named x σ)]
@@ -882,20 +907,26 @@
          (match (⊓ taddr0 taddr1 ρ)
            [(? TAddr? ta)
             (define inner (⊓ τ σ ρ))
-            (define tag (⊔tag tag0 tag1))
+            (define tag (⋈flat tag0 tag1))
             (if (or (T⊥? inner) (unmapped? tag))
                 T⊥ ;; XXX: don't heap-allocate bottom?
-                (mk-THeap #f ta tag inner))]
+                (*THeap 'meet-theap #f ta tag inner))]
            [(? T⊥?) T⊥]
            [bad (error 'type-meet "Non-TAddr meet? ~a ~a => ~a" taddr0 taddr1 bad)])]
-       [((THeap: _ taddr tag τ) (not (? THeap? σ)))
-        (mk-THeap #f taddr tag (⊓ τ σ ρ))]
-       [((not (? THeap? τ)) (THeap: _ taddr tag σ))
-        (mk-THeap #f taddr tag (⊓ τ σ ρ))]
-       [((TAddr: _ space mm0 em0) (TAddr: _ space mm1 em1))
-         (define mm (mode-comb mm0 mm1))
-         (define em (mode-comb em0 em1))
-         (if (or (eq? mm 'default) (eq? em 'default))
+       ;; τ <: Heap_mm,em[τ], but we upcast for later explicit downcasts
+       ;; [((THeap: sy taddr tag τ) (not (? THeap? σ)))
+       ;;  (*THeap 'meet-left sy taddr tag (⊓ τ σ ρ))]
+       ;; [((not (? THeap? τ)) (THeap: sy taddr tag σ))
+       ;;  (*THeap 'meet-right sy taddr tag (⊓ τ σ ρ))]
+       [((THeap: sy taddr tag τ) (not (? THeap? σ)))
+        (⊓ τ σ ρ)]
+       [((not (? THeap? τ)) (THeap: sy taddr tag σ))
+        (⊓ τ σ ρ)]
+       [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
+         (define space (⋈flat space0 space1))
+         (define mm (⋈flat mm0 mm1))
+         (define em (⋈flat em0 em1))
+         (if (or (unmapped? space) (unmapped? mm) (unmapped? em))
              T⊥
              (mk-TAddr #f space mm em))]
        [(_ _)
@@ -925,7 +956,7 @@
           [((TΛ: _ _ (Scope f)) (TΛ: _ _ (Scope t)))
            (check A f t)]
           [((TVariant: _ n tsf tr0) (TVariant: _ n tst tr1))
-           #:when (and (or (eq? tr0 'dc) (eq? tr1 'dc) (equal? tr0 tr1)))
+           #:when (implies (and tr0 tr1) (equal? tr0 tr1))
            (let all ([A A] [tsf tsf] [tst tst])
              (match* (tsf tst)
                [('() '()) A]
