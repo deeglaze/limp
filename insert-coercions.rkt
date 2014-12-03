@@ -107,16 +107,26 @@
              (ESet-add sy (deheapify-ct ct) (coerce-expr e) tag
                        (map coerce-expr es))]
 
-            [(ECall sy ct mf τs es) (ECall sy (deheapify-ct ct) mf τs (map coerce-expr es))]
-            [(ELet sy ct bus body) (ELet sy (deheapify-ct ct) (map coerce-bu bus) (coerce-expr body))]
-            [(EMatch sy ct de rules) (EMatch sy (deheapify-ct ct) (coerce-expr de) (map coerce-rule rules))]
-            [(ESet-union sy ct es) (ESet-union sy (deheapify-ct ct) (map coerce-rule es))]
-            [(ESet-intersection sy ct e es) (ESet-intersection sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
-            [(ESet-subtract sy ct e es) (ESet-subtract sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
-            [(ESet-member sy ct e v) (ESet-member sy (deheapify-ct ct) (coerce-expr e) (coerce-expr v))]
-            [(EMap-lookup sy ct m k) (EMap-lookup sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(EMap-has-key sy ct m k) (EMap-has-key sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(EMap-remove sy ct m k) (EMap-remove sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
+            [(ECall sy ct mf τs es)
+             (ECall sy (deheapify-ct ct) mf τs (map coerce-expr es))]
+            [(ELet sy ct bus body)
+             (ELet sy (deheapify-ct ct) (map coerce-bu bus) (coerce-expr body))]
+            [(EMatch sy ct de rules)
+             (EMatch sy (deheapify-ct ct) (coerce-expr de) (map coerce-rule rules))]
+            [(ESet-union sy ct es)
+             (ESet-union sy (deheapify-ct ct) (map coerce-rule es))]
+            [(ESet-intersection sy ct e es)
+             (ESet-intersection sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
+            [(ESet-subtract sy ct e es)
+             (ESet-subtract sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
+            [(ESet-member sy ct e v)
+             (ESet-member sy (deheapify-ct ct) (coerce-expr e) (coerce-expr v))]
+            [(EMap-lookup sy ct m k)
+             (EMap-lookup sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
+            [(EMap-has-key sy ct m k)
+             (EMap-has-key sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
+            [(EMap-remove sy ct m k)
+             (EMap-remove sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
             [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?))
              e]
             [_ (error 'coerce-expr "Unrecognized expression form: ~a" e)]))))

@@ -52,9 +52,9 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-;(type-print-verbosity 2)
-;;(pattern-print-verbosity 3)
-;(expr-print-verbosity 3)
+(type-print-verbosity 2)
+(pattern-print-verbosity 3)
+(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -100,12 +100,12 @@
    (define Γ (hasheq 'x xτ))
    (check expr-α-equal?
           ((tc-expr Γ #hasheq())
-     (parse-expr #'(#:match x [(foo y z) z])))
-    (parse-expr #'(#:ann (blah) (#:match (#:ann (#:inst Cord (bloo) (blah)) x)
-                                         [(#:ann (foo (bloo) (blah))
-                                                 (foo (#:ann (bloo) y)
-                                                      (#:ann (blah) z)))
-                                          (#:ann (blah) z)])))))
+           (parse-expr #'(#:match x [(foo y z) z])))
+          (parse-expr #'(#:ann (blah) (#:match (#:ann (#:inst Cord (bloo) (blah)) x)
+                                               [(#:ann (foo (bloo) (blah))
+                                                       (foo (#:ann (bloo) y)
+                                                            (#:ann (blah) z)))
+                                                (#:ann (blah) z)])))))
 
 (define CEK-lang (parse-language
                   #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]

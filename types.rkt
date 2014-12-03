@@ -173,22 +173,6 @@
       T⊥
       (mk-TVariant sy name ts tr)))
 
-(define vfff (list values #f #f #f))
-(define-match-expander Heapify:
-  (λ (stx)
-     (syntax-parse stx
-       [(_ hfy:id sy:expr taddr:expr tag:expr inner:expr)
-        #'(or (and (THeap: (and sy sy-v) (and taddr taddr-v) (and tag tag-v) inner)
-                   (app (λ _ (λ (v) (*THeap 'Heapify: sy-v taddr-v tag-v v))) hfy))
-              (and inner
-                   (app (λ _ vfff) (list hfy sy taddr tag))))]
-       [(_ hfy:id inner:expr)
-        #'(app (match-lambda
-                    [(THeap: sy taddr tag in)
-                     (list (λ (v) (*THeap 'Heapify: sy taddr tag v)) in)]
-                    [v (list values v)])
-               (list hfy inner))])))
-
 ;; A Trust-Tag is one of
 ;; - 'untrusted 
 ;; - 'bounded [only destructed]
@@ -820,7 +804,7 @@
      (when (unmapped? tag) (error 'heapify-upcast "Tags not consonant ~a, ~a" tag0 tag1))
      (*THeap 'upcast0 sy0 (type-join taddr0 taddr1) tag τ*)]
     ;; Not heapified. Upcast.
-    [(τ (THeap: sy taddr tag _)) (*THeap 'upcast1 sy τ taddr tag)]
+    [(τ (THeap: sy taddr tag _)) (*THeap 'upcast1 sy taddr tag τ)]
     ;; No heapification. No upcast.
     [(_ _) τ]))
 

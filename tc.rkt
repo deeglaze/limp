@@ -5,6 +5,7 @@
          racket/pretty
          racket/set
          racket/string racket/trace
+         (only-in "alloc-rules.rkt" normalize-taddr)
          "common.rkt" "language.rkt" "tast.rkt" "types.rkt")
 (provide tc-expr
          tc-pattern
@@ -49,6 +50,25 @@
         [_ τ])
       τ))
 
+(define (check-term ct expect τ theap-tag)
+  (define (sub-t who τ ct)
+    (cond
+     [expect
+      (if (<:? τ expect)
+          (or ct
+              (Check (retag-THeap (type-meet τ expect) expect theap-tag)))
+          (type-error "(~a) Expected ~a, got ~a" who expect τ))]
+     [else (or ct (Check τ))]))
+  (match ct
+    [(Cast σ)
+     (define ct* (cast-to τ σ))
+     (sub-t 'A (πct ct*) ct*)]
+    [(Check σ)
+     (cond
+      [(<:? τ σ) (sub-t 'B τ #f)]
+      [else (type-error "Expect ~a to be a subtype of ~a" τ σ)])]
+    [_ (sub-t 'C τ #f)]))
+
 (define (coerce-check-expect ct expect τ theap-tag)
   (define (sub-t who τ ct)
     (define (bad)
@@ -57,7 +77,7 @@
      [expect
       (if (<:? τ expect)
           (or ct
-              (Check (retag-THeap τ expect theap-tag)))
+              (Check (retag-THeap (type-meet τ expect) expect theap-tag)))
           (match τ
             ;; We have a one-off downcast that needs a dereference coercion
             [(THeap: _ #|<-sy|# taddr _ #|<-tag|# τ*)
@@ -68,8 +88,10 @@
                ;; Tear off heapification since it's a deref.
                (define-values (taddr* ct*)
                  (if (THeap? cτ)
-                     (values (THeap-taddr cτ) (ct-replace-τ ct (THeap-τ cτ)))
-                     (values taddr (or ct (Check τ*)))))
+                     (values (THeap-taddr cτ) ct #;(ct-replace-τ ct (THeap-τ cτ))
+                             )
+                     (values taddr (or ct (Check τ #;τ*
+                                                 )))))
                (Deref taddr* ct*)]
               (bad))]
             [_ (bad)]))]
@@ -124,7 +146,7 @@
 
 (define (tc-term Γ Ξ t expect-overlap)
   (define ct (Typed-ct t))
-  (define (chk pre-τ) (coerce-check-expect ct expect-overlap pre-τ #f))
+  (define (chk pre-τ) (check-term ct expect-overlap pre-τ #f))
   (match t
     [(Variant sy _ n ts) (error 'tc-term "Check variant")]
     [(Map sy _ f) (error 'tc-term "Check map")]
@@ -139,14 +161,20 @@
 (define (tc-pattern Γ Ξ pat expect)
   (define (tc Γ pat expect)
     (define ct (Typed-ct pat))
-    (define (chk pre-τ) (coerce-check-expect ct expect pre-τ #f))
-
+    (define (chk pre-τ mk-out)
+      (define ct* (coerce-check-expect ct expect pre-τ #f))
+      (match ct*
+        [(Deref taddr ct)
+         (define p (mk-out ct))
+         (PDeref (with-stx-stx p) p #f)]
+        [_ (mk-out ct*)]))
+    (unless expect (printf "Bad expect at ~a ~a~%" Γ pat))
     (match pat
       [(PAnd sy _ ps)
        (let tcp* ([Γ Γ] [ps ps] [rev-ps* '()] [expect expect])
          (match ps
            ['()
-            (values Γ (PAnd sy (chk expect) (reverse rev-ps*)))]
+            (values Γ (chk expect (λ (ct) (PAnd sy ct (reverse rev-ps*)))))]
            [(cons p ps)
             (define-values (Γ* p*) (tc Γ p expect))
             (define τ (πcc p*))
@@ -155,7 +183,8 @@
       [(PName sy _ x)
        (match (hash-ref Γ x #f)
          [#f (define t (or (πct ct) expect T⊤))
-             (values (hash-set Γ x t) (PName sy (chk t) x))]
+             (values (hash-set Γ x t)
+                     (chk t (λ (ct) (PName sy ct x))))]
          [τ
           (define τ* (type-meet τ expect))
           (define ct*
@@ -177,29 +206,24 @@
        ;; to explicitly insert the upcast.
        ;; This is to massage the expectation to the right shape
        (define met (resolve (type-meet res generic)))
-       (define (get-expectations met)
+       (define-values (expects err mk)
          (match met
-           [(Heapify: hfy (TVariant: _ n* τs tr))
+           [(TVariant: _ n* τs tr)
             ;; Name and length match due to type-meet
-            (values τs #f (λ (τs) (hfy (*TVariant #f n τs tr))))]
+            (values τs #f (λ (τs) (*TVariant #f n τs tr)))]
            ;; XXX: is this the right behavior?
            [_ (values (make-list len T⊤)
                       (type-error "Given variant ~a with arity ~a, expected overlap with ~a {~a}"
                                   n len res met)
                       (λ (τs) (*TVariant #f n τs #f)))]))
-       (define-values (expects err hfy)
-         (if (T⊥? met)
-             (get-expectations (resolve (type-meet res (heapify-generic generic))))
-             (get-expectations met)))
 
        (let all ([Γ Γ] [ps ps] [exs expects] [τs-rev '()] [rev-ps* '()])
          (match* (ps exs)
            [('() '())
-            (values Γ (PVariant sy
-                                (or err
-                                    (chk (hfy (reverse τs-rev))))
-                                n
-                                (reverse rev-ps*)))]
+            (define mkp (λ (ct) (PVariant sy ct n (reverse rev-ps*))))
+            (values Γ (if err
+                          (mkp err)
+                          (chk (mk (reverse τs-rev)) mkp)))]
            [((cons p ps) (cons ex exs))
             (define-values (Γ* p*) (tc Γ p ex))
             (all Γ* ps exs (cons (πcc p*) τs-rev) (cons p* rev-ps*))]))]
@@ -207,41 +231,37 @@
        [(or (and (PMap-with sy _ k v p) (app (λ _ PMap-with) ctor))
             (and (PMap-with* sy _ k v p) (app (λ _ PMap-with*) ctor)))
         (define met (resolve (type-meet expect generic-map)))
-        (define (get-expectations met)
+        (define-values (err exk exv mk)
           (match met
-            [(Heapify: hfy (TMap: _ d r ext))
-             (values d r (λ (d r) (hfy (mk-TMap #f d r ext))))]
-            ;; XXX: if not a map, then what?
-            [_ (values T⊤ T⊤ (λ (d r) (mk-TMap #f d r limp-externalize-default)))]))
-        (define-values (exk exv hfy)
-          (if (T⊥? met)
-              (get-expectations (resolve (type-meet met (heapify-generic generic-map))))
-              (get-expectations met)))        
+            [(TMap: _ d r ext)
+             (values #f d r (λ (d r) (mk-TMap #f d r ext)))]
+            [_ (values (type-error "Map pattern expects a map type, got ~a" expect)
+                       T⊤ T⊤ (λ (d r) (mk-TMap #f d r (get-option 'externalize))))]))        
         (define-values (Γ* k*) (tc Γ k exk))
         (define-values (Γ** v*) (tc Γ* v exv))
         (define-values (Γ*** p*) (tc Γ** p expect))
+        (define mkp (λ (ct) (ctor sy ct k* v* p*)))
         (values Γ***
-                (ctor sy
-                      (chk (type-join (hfy (πcc k*) (πcc v*)) (πcc p*)))
-                      k* v* p*))]
+                (if err
+                    (mk err)
+                    (chk (type-join (mk (πcc k*) (πcc v*)) (πcc p*)) mkp)))]
 
        [(or (and (PSet-with sy _ v p) (app (λ _ PSet-with) ctor))
             (and (PSet-with* sy _ v p) (app (λ _ PSet-with*) ctor)))
         (define met (resolve (type-meet expect generic-set)))
-        (define (get-expectations met)
+        (define-values (err exv mk)
           (match met
-            [(Heapify: hfy (TSet: _ v ext))
-             (values v (λ (τ) (hfy (mk-TSet #f τ ext))))]
-            [_ (values T⊤ (λ (τ) (mk-TSet #f T⊤ limp-externalize-default)))]))
-        (define-values (exv hfy)
-          (if (T⊥? met)
-              (get-expectations (resolve (type-meet expect (heapify-generic generic-set))))
-              (get-expectations met)))
+            [(TSet: _ v ext)
+             (values #f v (λ (τ) (mk-TSet #f τ ext)))]
+            [_ (values (type-error "Set pattern expects a set type, got ~a" expect)
+                       T⊤ (λ (τ) (mk-TSet #f T⊤ (get-option 'externalize))))]))
         (define-values (Γ* v*) (tc Γ v exv))
         (define-values (Γ** p*) (tc Γ* p expect))
+        (define mkp (λ (ct) (ctor sy ct v* p*)))
         (values Γ**
-                (ctor sy (chk (type-join (hfy (πcc v*)) (πcc p*)))
-                      v* p*))]
+                (if err
+                    (mk err)
+                    (chk (type-join (mk (πcc v*)) (πcc p*)) mkp)))]
 
        [(PDeref sy _ p imp)
         ;; If implicit, then the expected type should be heapified (when checking for heapification)
@@ -269,7 +289,7 @@
         (define t* (tc-term Γ Ξ t expect))
         (values Γ (PTerm sy (Typed-ct t*) t*))]
        [(or (? PWild?) (? PIsExternal?) (? PIsAddr?) (? PIsType?))
-        (values Γ (replace-ct (chk T⊤) pat))]
+        (values Γ (chk T⊤ (λ (ct) (replace-ct ct pat))))]
        [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
   (tc Γ pat expect))
 
@@ -320,20 +340,24 @@
 ;; Ξ : metafunction names ↦ Type,
 ;; e : expr
 ;; Output is a fully annotated expression
-(define ((tc-expr Γ Ξ) e [expected #f] #:path [path '()])
+(define ((tc-expr Γ Ξ) e [expected T⊤] #:path [path '()])
   (define (tc-expr* e expected path #:tagged [tagged #f])
     (define ct (Typed-ct e))
+    (define expected-τ
+      (type-meet expected (match ct [(Check τ) τ] [_ T⊤])))
     (define stx (with-stx-stx e))
-    (define (chk pre-τ) (coerce-check-expect ct expected pre-τ (or tagged path)))
-    (define (project-check pred form ty)
-      (define σ
-        (match ct
-          [(Cast σ) σ]
-          [(Check σ) σ]
-          [_ (error 'project-check "Expected a type annotation ~a" form)]))
-      (if (pred σ)
-          ct
-          (type-error "Expect ~a to have ~a type, got ~a" form ty σ)))
+    (define (chk pre-τ mk-out)
+      (unless pre-τ (printf "chk bad: ~a~%" mk-out))
+      (define ct* (coerce-check-expect ct expected pre-τ (or tagged path)))
+      (match ct*
+        [(Deref taddr ct)
+         (define e* (mk-out ct))
+         (EStore-lookup (with-stx-stx e*)
+                        (to-cast ct)
+                        e*
+                        (get-option 'lm)
+                        #t)]
+        [_ (mk-out ct*)]))
     (match e
       [(ECall sy _ mf τs es)
        ;; We monomorphize as well as check the function.
@@ -384,13 +408,14 @@
            name*]
           [else #f]))
        (if renamed ;; monomorphized
-           (ECall sy (chk rng) renamed '() es*)
-           (ECall sy (chk rng) mf τs es*))]
+           (chk rng (λ (ct) (ECall sy ct renamed '() es*)))
+           (chk rng (λ (ct) (ECall sy ct mf τs es*))))]
 
       [(EVariant sy _ n tag τs es)
        ;; Find all the n-named variants and find which makes sense.
        (define arity (length es))
        (define generic (generic-variant n arity))
+       (define-values (W expected*) (unwrap expected-τ))
        ;; If we expect a type, we have a cast or explicit check, then use those rather than
        ;; an inferred variant type.
        (define (do σs tr)
@@ -400,11 +425,13 @@
                       [e (in-list es)]
                       [i (in-naturals)])
              (tc-expr* e σ `((,n . ,i) . ,path) #:tagged (explicit-tag tag i))))
-         (EVariant sy
-                   (if (eq? tr 'bounded)
-                       (type-error "Constructed a variant marked as bounded: ~a" n)
-                       (Check (mk-TVariant #f n (map πcc es*) tr)))
-                   n (give-tag tag path) τs es*))
+         (chk (W (mk-TVariant #f n (map πcc es*) tr))
+              (λ (ct)
+                 (EVariant sy
+                           (if (eq? tr 'bounded)
+                               (type-error "Constructed a variant marked as bounded: ~a" n)
+                               ct)
+                           n (give-tag tag path) τs es*))))
        (define (infer)
          (define possible-σs (lang-variants-of-arity generic))
          (define found
@@ -426,28 +453,21 @@
                        n tag τs (for/list ([e (in-list es)]
                                            [i (in-naturals)])
                                   (tc-expr* e T⊤ `((,n . ,i) . ,path))))))
-       ;; XXX: type-meet does unification!
-       (if expected
-           (match (resolve (type-meet expected generic))
-             [(TVariant: _ _ σs tr) (do σs tr)]
-             [_ 'bad])
-           (match ct
-             [(Check τ)
-              (match (resolve (type-meet τ generic))
-                [(TVariant: _ _ σs tr) (do σs tr)]
-                [_ (infer)])]
-             [_ (infer)]))]
+       (match (resolve (type-meet expected* generic))
+         [(TVariant: _ _ σs tr) (do σs tr W)]
+         [_ (infer)])]
 
       [(ERef sy _ x)
-       (ERef sy (chk (hash-ref Γ x (unbound-pat-var sy 'tc-expr x))) x)]
+       (chk (hash-ref Γ x (unbound-pat-var sy 'tc-expr x))
+            (λ (ct) (ERef sy ct x)))]
 
       [(EStore-lookup sy _ k lm imp)
        ;; k has an expected type if this is an implicit lookup
        (define k* (tc-expr* k
                             (if imp
                                 (if (check-for-heapification?)
-                                    (heapify-generic expected)
-                                    expected)
+                                    (heapify-generic expected-τ)
+                                    expected-τ)
                                 generic-TAddr)
                             (cons 'lookup path)))
        (define ct*
@@ -461,73 +481,68 @@
                  (type-error "Implicit lookup did heapify: ~a" kτ))]
             [else ;; Not checking for heapification, so ignore that this is a lookup form.
              (Typed-ct k*)])]
-          [else (chk T⊤)]))
+          [else (Check T⊤)])) ;; XXX: right?
        (EStore-lookup sy ct* k* lm imp)]
 
       [(EAlloc sy _ tag)
-       (EAlloc sy (project-check TAddr? "alloc" "address") (give-tag tag path))]
+       (chk generic-TAddr (λ (ct) (EAlloc sy ct (give-tag tag path))))]
 
       [(ELet sy _ bus body)
        (define-values (Γ* bus*) (tc-bus Γ Ξ bus 'let-bu path))
        (define body* ((tc-expr Γ* Ξ) body expected #:path (cons 'let-body path)))
-       (ELet sy (chk (πcc body*)) bus* body*)]
+       (chk (πcc body*) (λ (ct) (ELet sy ct bus* body*)))]
 
       [(EMatch sy _ de rules)
-       (define d* (tc-expr* de #f (cons 'match-disc path)))
+       (define d* (tc-expr* de T⊤ (cons 'match-disc path)))
        (define-values (rules* τjoin)
          (check-and-join-rules Γ Ξ rules (πcc d*) expected 'match-rule path))
-       (EMatch sy (chk τjoin) d* rules*)]
+       (chk τjoin (λ (ct) (EMatch sy ct d* rules*)))]
 
       [(EExtend sy _ m tag k v)
+       (define-values (W expected*) (unwrap expected-τ))
        (define-values (d r ext)
-         (match (resolve (type-meet expected generic-map))
+         (match (resolve (type-meet expected* generic-map))
            [(TMap: _ d r ext) (values d r ext)] ;; XXX: shouldn't be heapified?
-           [_ (values #f #f 'dc)]))
+           [_ (values T⊤ T⊤ 'dc)]))
        (define m* (tc-expr* m expected (cons 'extend-map path)))
        (define k* (tc-expr* k d (cons 'extend-key path) #:tagged (explicit-tag tag 0)))
        (define v* (tc-expr* v r (cons 'extend-value path) #:tagged (explicit-tag tag 1)))
-       (EExtend sy (chk (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) ext)))
-                m* (give-tag tag path) k* v*)]
+       (chk (type-join (πcc m*) (W (mk-TMap #f (πcc k*) (πcc v*) ext)))
+            (λ (ct) (EExtend sy ct m* (give-tag tag path) k* v*)))]
 
-      [(EEmpty-Map sy _) (EEmpty-Map sy (project-check TMap? "empty-map" "map"))]
+      [(EEmpty-Map sy _)
+       (chk generic-map (λ (ct) (EEmpty-Map sy ct)))]
 
-      [(EEmpty-Set sy _) (EEmpty-Set sy (project-check TSet? "empty-set" "set"))]
+      [(EEmpty-Set sy _)
+       (chk generic-set (λ (ct) (EEmpty-Set sy ct)))]
 
       [(ESet-union sy _ es)
        (define es* (for/list ([e (in-list es)]
                               [i (in-naturals)])
                      (tc-expr* e expected `((union . ,i) . ,path))))
-       (ESet-union sy
-                   (chk
-                    (for/fold ([τ T⊥]) ([e (in-list es*)])
-                      (type-join τ (πcc e))))
-                   es*)]
+       (chk (for/fold ([τ T⊥]) ([e (in-list es*)])
+              (type-join τ (πcc e)))
+            (λ (ct) (ESet-union sy ct es*)))]
 
       [(ESet-add sy _ e tag es)
        (define e* (tc-expr* e generic-set `((set-add . 0) . ,path)))
        (define es*
          (for/list ([e (in-list es)]
                     [i (in-naturals 1)])
-           (tc-expr* e #f `((set-add . ,i) . ,path) #:tagged (explicit-tag tag i))))
-       (ESet-add sy
-                 (chk
-                  (for/fold ([τ (πcc e*)]) ([e (in-list es*)])
-                    (type-join τ (mk-TSet #f (πcc e) 'dc))))
-                 e*
-                 (give-tag tag path)
-                 es*)]
+           (tc-expr* e T⊤ `((set-add . ,i) . ,path) #:tagged (explicit-tag tag i))))
+       (chk (for/fold ([τ (πcc e*)]) ([e (in-list es*)])
+              (type-join τ (mk-TSet #f (πcc e) 'dc)))
+            (λ (ct) (ESet-add sy ct e* (give-tag tag path) es*)))]
 
       [(ESet-intersection sy _ e es)
        (match-define (cons e* es*)
                      (for/list ([e (in-list (cons e es))]
                                 [i (in-naturals)])
                        (tc-expr* e generic-set `((intersection . ,i) . ,path))))
-       (ESet-intersection sy
-                          (chk
-                           (for/fold ([τ (πcc e*)])
-                               ([e (in-list es*)])
-                             (type-meet τ (πcc e))))
-                          e* es*)]
+       (chk (for/fold ([τ (πcc e*)])
+                ([e (in-list es*)])
+              (type-meet τ (πcc e)))
+            (λ (ct) (ESet-intersection sy ct e* es*)))]
 
       [(ESet-subtract sy _ e es) (error 'tc-expr "Todo: set-subtract")]
       [(ESet-member sy _ e v) (error 'tc-expr "Todo: set-member?")]
@@ -535,7 +550,7 @@
        (define m* (tc-expr* m generic-map (cons 'lookup-map path)))
        (match (resolve (type-meet (πcc m*) generic-map))
          [(TMap: _ d r _) ;; XXX: shouldn't be heapified?
-          (EMap-lookup sy (chk r) m* (tc-expr* k d (cons 'lookup-key path)))]
+          (chk r (λ (ct) (EMap-lookup sy ct m* (tc-expr* k d (cons 'lookup-key path)))))]
          [τ (EMap-lookup sy (type-error "Expected a map type: ~a" τ)
                          m* (tc-expr* k T⊤ (cons 'lookup-key path)))])]
       [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]
