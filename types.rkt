@@ -556,7 +556,7 @@
 (define limp-default-deref-addr
   (mk-TAddr #f
             limp-default-addr-space
-            'resolve
+            'delay
             'identity))
 (define limp-default-rec-addr limp-default-Λ-addr)
 (define limp-default-⊤-addr limp-default-Λ-addr)
@@ -653,16 +653,12 @@
          (<:?-aux (grow-A) (resolve τ ρ) σ)]
         [(_ (? needs-resolve?))
          (<:?-aux (grow-A) τ (resolve σ ρ))]
-        ;; XXX: (NO?) Heap annotations are not directional for subtyping
-        ;[((THeap: _ _ τ) σ) (<:?-aux A τ σ)]
         [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
          (and (not (unmapped? (⋈flat tag0 tag1)))
               (seq A
                    (<:?-aux A taddr0 taddr1)
                    (<:?-aux A τ σ)))]
-        [((? THeap?) (not (? THeap?))) #f] ;; No downcast
-        [((not (? THeap? τ)) (THeap: _ _ _ σ)) ;; Yes up
-         (<:?-aux A τ σ)]
+        ;; No implicit casts from heap/non-heap
         [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
          (and (for/and ([t (in-list ts)])
                 (<:?-aux A t σ))
@@ -775,10 +771,6 @@
                 (both)
                 (*THeap 'join-theap #f ta tag (⊔ τ σ ρ)))]
            [bad (error 'type-join "Non-TAddr join? ~a ~a => ~a" taddr0 taddr1 bad)])]
-        [((THeap: _ taddr tag τ) (not (? THeap? σ)))
-         (*THeap 'join-left #f taddr tag (⊔ τ σ ρ))]
-        [((not (? THeap? τ)) (THeap: _ taddr tag σ))
-         (*THeap 'join-right #f taddr tag (⊔ τ σ ρ))]
         [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
          (define space (⋈flat space0 space1))
          (define mm (⋈flat mm0 mm1))
@@ -795,18 +787,6 @@
       ['() acc]
       [(cons τ τs) (rec τs (type-join τ acc))]))
   (rec τs T⊥))
-
-(define (heapify-upcast τ σ)
-  (match* (τ σ)
-    ;; Fill in address details if already heapified
-    [((THeap: sy0 taddr0 tag0 τ*) (THeap: sy1 taddr1 tag1 _))
-     (define tag (⋈flat tag0 tag1))
-     (when (unmapped? tag) (error 'heapify-upcast "Tags not consonant ~a, ~a" tag0 tag1))
-     (*THeap 'upcast0 sy0 (type-join taddr0 taddr1) tag τ*)]
-    ;; Not heapified. Upcast.
-    [(τ (THeap: sy taddr tag _)) (*THeap 'upcast1 sy taddr tag τ)]
-    ;; No heapification. No upcast.
-    [(_ _) τ]))
 
 (define (type-meet τ σ)
   ;; potentially creates several equal but differently named types.
@@ -828,8 +808,8 @@
    (cond
     [(and (TError? τ) (TError? σ))
      (TError (append (TError-msgs τ) (TError-msgs σ)))]
-    [(<:? τ σ ρ) (heapify-upcast τ σ)]
-    [(<:? σ τ ρ) (heapify-upcast σ τ)]
+    [(<:? τ σ ρ) τ]
+    [(<:? σ τ ρ) σ]
     [else
      (match* (τ σ)
        [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
@@ -897,15 +877,6 @@
                 (*THeap 'meet-theap #f ta tag inner))]
            [(? T⊥?) T⊥]
            [bad (error 'type-meet "Non-TAddr meet? ~a ~a => ~a" taddr0 taddr1 bad)])]
-       ;; τ <: Heap_mm,em[τ], but we upcast for later explicit downcasts
-       ;; [((THeap: sy taddr tag τ) (not (? THeap? σ)))
-       ;;  (*THeap 'meet-left sy taddr tag (⊓ τ σ ρ))]
-       ;; [((not (? THeap? τ)) (THeap: sy taddr tag σ))
-       ;;  (*THeap 'meet-right sy taddr tag (⊓ τ σ ρ))]
-       [((THeap: sy taddr tag τ) (not (? THeap? σ)))
-        (⊓ τ σ ρ)]
-       [((not (? THeap? τ)) (THeap: sy taddr tag σ))
-        (⊓ τ σ ρ)]
        [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
          (define space (⋈flat space0 space1))
          (define mm (⋈flat mm0 mm1))

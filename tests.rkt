@@ -31,6 +31,10 @@
    (syntax-parse stx
      [(~var e (Expression-cls (current-language) #f)) (attribute e.e)]))
 
+(type-print-verbosity 2)
+(pattern-print-verbosity 3)
+(expr-print-verbosity 3)
+
  ;; (foo a (List a))
  (define foo-a-list-a
    (mk-TVariant #f 'foo (list (mk-TFree #f 'a) 
@@ -51,10 +55,6 @@
  ;; (foo ⊤ ⊤)
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
-
-(type-print-verbosity 2)
-(pattern-print-verbosity 3)
-(expr-print-verbosity 3)
 
  (define list-a
    (mk-TΛ #f 'a (abstract-free (*TRUnion #f
@@ -149,7 +149,12 @@
     ;; typecheck with heap allocation
     (parameterize ([current-language (heapify-language CEK-lang #f)])
       (pretty-print (Language-user-spaces (current-language)))
-      (define CEK (parse-reduction-relation CEK-Rstx))
+      (define CEK ((heapify-rules
+                    limp-default-deref-addr
+                    limp-default-deref-addr
+                    limp-default-deref-addr
+                    #f)
+                   (parse-reduction-relation CEK-Rstx)))
       (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
       (parameterize ([instantiations (make-hash)])
         (define-values (CEK* metafunctions*)
@@ -183,53 +188,6 @@
       (language->mkV CEK* '() void))
       |#
 )))
-
-(parameterize ([current-language
-                (parse-language
-                 #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]
-                    [(x) #:external Name #:parse identifier?]
-                    [Value (Clo x Expr Env)]
-                    ;; Changed Env and List. Algorithmic rules for this?
-                    [(ρ) Env (#:map Name (#:addr #:delay #:structural) #:externalize)]
-                    [List (#:Λ X (#:U (Nil) (Cons X (#:addr #:delay #:structural))))]
-                    [(φ) Frame (ar Expr Env) (fn Value)]
-                    [(κ) Kont (#:inst List Frame)]
-                    [State (ev Expr Env Kont)
-                           (co Kont Value)
-                           (ap x Expr Env Value Kont)]))])
-  (define naive-rewrite
-    (parse-reduction-relation
-     #'([#:--> (ev (app e0 e1) ρ κ)
-               (ev e0 ρ (Cons #:tag appL (ar e1 ρ)
-                              (#:let ([#:where a (#:alloc #:tag rule-0-cons-1
-                                                          #:delay #:structural)]
-                                      [#:update a κ])
-                                     a)))]
-        [#:--> (ev (lam y e) ρ κ)
-               (co κ (Clo y e ρ))]
-        [#:--> #:name var-lookup
-               (ev (#:and (#:has-type Name) x) ρ κ)
-               (co κ (#:cast Value (#:lookup (#:map-lookup ρ x) #:delay)))] ;; ADDED #:lookup, #:cast
-
-        [#:--> (co (Cons (ar e ρ) κ) v)
-               (ev e ρ (Cons #:tag appR (fn v) (#:let ([#:where a (#:alloc #:tag rule-3-cons-1
-                                                                           #:delay #:structural)]
-                                                       [#:update a κ])
-                                                      a)))]
-        [#:--> (co (Cons (fn (Clo z e ρ)) κ) v)
-               (ap z e ρ v (#:cast Kont (#:lookup κ #:delay)))] ;; ADDED #:lookup, #:cast
-
-        [#:--> #:name fun-app
-               (ap w e ρ v κ)
-               (ev e (#:extend ρ #:tag ext w
-                               (#:let ([#:where a (#:alloc #:tag ext-value #:delay #:structural)]
-                                       [#:update a v])
-                                      a))
-                   κ)])))
-  (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
-  (define-values (naive* metafunctions*2)
-    (tc-language naive-rewrite '() Sτ))
-  (report-all-errors naive*))
 
 (parameterize ([current-language
                 (parse-language

@@ -238,7 +238,7 @@ term template
         [(ECall _ _ mf τs es) `(,mf . ,(map rec es))]
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
-        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(and lm (s->k lm)) ,@(if imp '(#:implicit) '()))]
+        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(and lm (s->k lm)) ,@(if imp '(#:implicit ,imp) '()))]
         [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
          `(#:alloc ,@(do-tag tag) ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
@@ -255,6 +255,7 @@ term template
         [(EMap-lookup _ _ m k) `(#:map-lookup ,(rec m) ,(rec k))]
         [(EMap-has-key _ _ m k) `(#:has-key? ,(rec m) ,(rec k))]
         [(EMap-remove _ _ m k) `(#:map-remove ,(rec m) ,(rec k))]
+        [(EHeapify _ _ e taddr tag) `(#:addrize ,(rec e) ,taddr ,@(do-tag tag))]
         [_ `(error$ ,(format "Unrecognized expression form: ~a" e))]))
     (case v
       [(0) sexp]
@@ -282,6 +283,7 @@ term template
     [(EMap-lookup sy _ m k) (EMap-lookup sy ct m k)]
     [(EMap-has-key sy _ m k) (EMap-has-key sy ct m k)]
     [(EMap-remove sy _ m k) (EMap-remove sy ct m k)]
+    [(EHeapify sy _ e taddr tag) (EHeapify sy ct e taddr tag)]
     [_ (error 'expr-replace-ct "Unrecognized expression form: ~a" e)]))
 
 (define (write-expr e port mode)
@@ -295,7 +297,7 @@ term template
 (struct ERef Expression (x) #:transparent)
 ;; lm ::= 'resolve | 'delay | 'deref
 ;; An implicit store lookup is k pre-heapification, and the lookup post-
-(struct EStore-lookup Expression (k lm implicit?) #:transparent)
+(struct EStore-lookup Expression (k lm op-implicit) #:transparent)
 ;; TODO: add a "ghost" store lookup that is identity concretely,
 ;;       but expects to need a deref in the transform.
 ;;       It exists to change the default deref behavior.
@@ -315,7 +317,8 @@ term template
 (struct EMap-lookup Expression (m k) #:transparent)
 (struct EMap-has-key Expression (m k) #:transparent)
 (struct EMap-remove Expression (m k) #:transparent)
-
+;; For heap-allocation annotations and algebraic eliminations
+(struct EHeapify Expression (e taddr tag) #:transparent)
 (struct implicit-tag (tag) #:prefab)
 #|
 expr template
@@ -338,6 +341,7 @@ expr template
     [(EMap-lookup sy ct m k) ???]
     [(EMap-has-key sy ct m k) ???]
     [(EMap-remove sy ct m k) ???]
+    [(EHeapify sy ct m taddr tag) ???]
     [_ (error who "Unrecognized expression form: ~a" e)])
 |#
 
@@ -400,6 +404,8 @@ expr template
     [((EMap-remove _ ct m0 k0) (EMap-remove _ ct m1 k1))
      (and (expr-α-equal? m0 m1 ρ0 ρ1)
           (expr-α-equal? k0 k1 ρ0 ρ1))]
+    [((EHeapify _ ct e0 taddr tag) (EHeapify _ ct e1 taddr tag))
+     (expr-α-equal? e0 e1 ρ0 ρ1)]
     [(_ _) #f]))
 
 ;; Binding updates
@@ -629,6 +635,7 @@ expr template
       [(EMap-lookup sy _ m k) (EMap-lookup sy ct* (self m) (self k))]
       [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
+      [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
       [_ (error 'abstract-frees-in-expr "Unrecognized expression form: ~a" e)])))
 
 (define (open-scopes-in-expr e substs)
@@ -657,6 +664,7 @@ expr template
       [(EMap-lookup sy _ m k) (EMap-lookup sy ct* (self m) (self k))]
       [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
+      [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
       [_ (error 'open-scopes-in-expr "Unrecognized expression form: ~a" e)])))
 
 (define (abstract-frees-in-term t names)

@@ -10,6 +10,7 @@
          racket/pretty
          racket/trace)
 (provide language->rules report-rules heapify-language
+         heapify-rules
          normalize-taddr solidify-τ solidify-language)
 
 ;; ROUNDTOIT
@@ -190,9 +191,9 @@
 
 (define (heapify-language L heapify-nonrec?)
   (define us (Language-ordered-us L))
-  (define vtaddr (mk-TAddr #f 'limp 'delay 'structural))
-  (define etaddr (mk-TAddr #f 'limp 'delay 'structural))
-  (define staddr (mk-TAddr #f 'limp 'delay 'structural))
+  (define vtaddr limp-default-deref-addr)
+  (define etaddr limp-default-deref-addr)
+  (define staddr limp-default-deref-addr)
   (define ordered
     (for/list ([(name ty) (in-dict us)])
       (cons name (heapify-τ vtaddr etaddr staddr
@@ -202,6 +203,101 @@
   (struct-copy Language L
                [user-spaces (make-hash ordered)]
                [ordered-us ordered]))
+
+(define (heapify-ct vtaddr etaddr staddr heapify-nonrec?)
+  (define hτ (λ (τ) (heapify-τ vtaddr etaddr staddr heapify-nonrec? τ)))
+  (λ (ct) (and ct (ct-replace-τ ct (hτ (πct ct))))))
+;; All explicit annotations should also be heapified
+
+(define (heapify-expr vtaddr etaddr staddr heapify-nonrec?)
+  (define hτ (λ (τ) (heapify-τ vtaddr etaddr staddr heapify-nonrec? τ)))
+  (define hbus (heapify-bus vtaddr etaddr staddr heapify-nonrec?))
+  (define hrules (heapify-rules vtaddr etaddr staddr heapify-nonrec?))
+  (define hct (heapify-ct vtaddr etaddr staddr heapify-nonrec?))
+  (define (self e)
+    (define ct (Typed-ct e))
+    (define ct* (hct ct))
+    (match e
+      [(ECall sy _ mf τs es)
+       (ECall sy ct* mf (map hτ τs) (map self es))]
+      [(EVariant sy _ n tag τs es)
+       (EVariant sy ct* n tag (map hτ τs) (map self es))]
+      [(ERef sy _ x) (ERef sy ct* x)]
+      [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
+      [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
+      [(ELet sy _ bus body) (ELet sy ct* (hbus bus names) (self body))]
+      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (hrules rules names))]
+      [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
+      [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
+      [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
+      [(ESet-union sy _ es) (ESet-union sy ct* (map self es))]
+      [(ESet-add sy _ e tag es) (ESet-add sy ct* (self e) tag (map self es))]
+      [(ESet-intersection sy _ e es) (ESet-intersection sy ct* (self e) (map self es))]
+      [(ESet-subtract sy _ e es) (ESet-subtract sy ct* (self e) (map self es))]
+      [(ESet-member sy _ e v) (ESet-member sy ct* (self e) (self v))]
+      [(EMap-lookup sy _ m k) (EMap-lookup sy ct* (self m) (self k))]
+      [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
+      [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
+      [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
+      [_ (error 'heapify-expr "Unrecognized expression form: ~a" e)]))
+  self)
+
+(define (heapify-term vtaddr etaddr staddr heapify-nonrec?)
+  (define hct (heapify-ct vtaddr etaddr staddr heapify-nonrec?))
+  (define (self t)
+    (define ct* (hct (Typed-ct t)))
+    (match t
+      [(Variant sy _ n ts) (Variant sy ct* n (map self ts))]
+      [(Map sy _ f) (Map sy ct* (for/hash ([(k v) (in-hash f)])
+                                  (values (self k) (self v))))]
+      [(Set sy _ s) (Set sy ct* (for/set ([v (in-set s)])
+                                  (self v)))]
+      [(External sy _ v) (External sy ct* v)]
+      [_ (error 'heapify-term "Unsupported term ~a" t)]))
+  self)
+
+(define (heapify-pattern vtaddr etaddr staddr heapify-nonrec?)
+  (define ht (heapify-term vtaddr etaddr staddr heapify-nonrec?))
+  (define hct (heapify-ct vtaddr etaddr staddr heapify-nonrec?))
+  (define (self pat)
+    (define ct* (hct (Typed-ct pat)))
+    (match pat
+      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
+      [(PName sy _ x) (PName sy ct* x)]
+      [(PWild sy _) (PWild sy ct*)]
+      [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
+      [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
+      [(PMap-with* sy _ k v p) (PMap-with* sy ct* (self k) (self v) (self p))]
+      [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
+      [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
+      [(PTerm sy _ t) (PTerm sy ct* (ht t))]
+      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
+      [(PIsExternal sy _) (PIsExternal sy ct*)]
+      [(PIsAddr sy _) (PIsAddr sy ct*)]
+      [(PIsType sy _) (PIsType sy ct*)]
+      [_ (error 'heapify-pat "Unsupported pattern: ~a" pat)]))
+  self)
+
+(define ((heapify-bus vtaddr etaddr staddr heapify-nonrec?) bus)
+  (map (heapify-bu vtaddr etaddr staddr heapify-nonrec?) bus))
+(define (heapify-bu vtaddr etaddr staddr heapify-nonrec?)
+  (define he (heapify-expr vtaddr etaddr staddr heapify-nonrec?))
+  (λ (bu)
+   (match bu
+     [(Where sy pat e)
+      (Where sy
+             (heapify-pattern vtaddr etaddr staddr heapify-nonrec? pat)
+             (he e))]
+     [(Update sy k v) (Update sy (he k) (he v))])))
+
+(define ((heapify-rules vtaddr etaddr staddr heapify-nonrec?) rules)
+  (map (heapify-rule vtaddr etaddr staddr heapify-nonrec?) rules))
+(define (heapify-rule vtaddr etaddr staddr heapify-nonrec?)
+  (define hpat (heapify-pattern vtaddr etaddr staddr heapify-nonrec?))
+  (define he (heapify-expr vtaddr etaddr staddr heapify-nonrec?))
+  (define hbus (heapify-bus vtaddr etaddr staddr heapify-nonrec?))
+  (match-lambda
+   [(Rule sy name pat e bus) (Rule sy name (hpat pat) (he e) (hbus bus))]))
 
 (define (normalize-taddr taddr)
   (match-define (TAddr: sy space mm em) taddr)

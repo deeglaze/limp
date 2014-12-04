@@ -10,7 +10,6 @@
 
 (define (deheapify-ct ct)
   (ct-replace-τ ct (solidify-τ (πct ct))))
-(trace deheapify-ct)
 
 (define (coerce-pattern pat)
   (define ct (Typed-ct pat))
@@ -54,10 +53,9 @@
     [_
      (match e
        ;; The expression anticipated a lookup
-       [(EStore-lookup sy ct k lm #t)
+       [(EStore-lookup sy ct k lm (? TAddr? imp))
         (define kct (Typed-ct k))
-        (match-define (THeap: _ taddr _ τ) (πct kct))
-        (define taddr* (normalize-taddr taddr))
+        (define taddr* (normalize-taddr imp))
         (EStore-lookup sy
                        (Check taddr*)
                        (coerce-expr (replace-ct (ct-replace-τ kct taddr*) k))
@@ -65,26 +63,26 @@
        [_ #f])]))
 
 (define (do-store e)
-  (define ct (Typed-ct e))
-  (match ct
-    [(or (and (Cast (and (THeap: sy taddr tag τ) th)) (app (λ _ Cast) ctor))
-         (and (Check (and (THeap: sy taddr tag τ) th)) (app (λ _ Check) ctor)))
-     (define esy (with-stx-stx e))
-     (define cτ (Check τ))
+  (match e
+    [(EHeapify sy ct e* taddr tag)
+     (define cτ (deheapify-ct ct))
      (define ctaddr (Check (normalize-taddr taddr)))
      (define x (gensym 'temp))
      (define a (gensym 'tempa))
-     (ELet esy
+     (ELet sy
            ctaddr
-           (list (Where esy
-                        (PName esy cτ x)
-                        (coerce-expr (expr-replace-ct (Check τ) e)))
-                 (Where esy
-                        (PName esy ctaddr a)
-                        (EAlloc esy ctaddr tag))
-                 (Update esy (ERef esy ctaddr a) (ERef esy cτ x)))
-           (ERef esy ctaddr a))]
-    [_ #f]))
+           (list (Where sy
+                        (PName sy cτ x)
+                        (coerce-expr (expr-replace-ct cτ e*)))
+                 (Where sy
+                        (PName sy ctaddr a)
+                        (EAlloc sy ctaddr tag))
+                 (Update sy (ERef sy ctaddr a) (ERef sy cτ x)))
+           (ERef sy ctaddr a))]
+    [_
+     (when (THeap? (πcc e))
+       (raise-syntax-error 'do-store "Expected coercion from tc" (with-stx-stx e)))
+     #f]))
 
 (define (coerce-expr e)
   (define e* (do-deref e))
@@ -96,6 +94,8 @@
             [(EStore-lookup sy ct k lm imp)
              (when imp (error 'coerce-expr "Must be done with do-deref ~a" e))
              (EStore-lookup sy (deheapify-ct ct) (coerce-expr k) lm #f)]
+            [(? EHeapify?)
+             (error 'coerce-expr "Should be removed: ~a" e)]
             ;; Structurally coerce
             [(EVariant sy ct n tag τs es)
              (EVariant sy (deheapify-ct ct) n tag τs (map coerce-expr es))]
