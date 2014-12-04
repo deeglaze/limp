@@ -168,26 +168,19 @@
         (report-all-errors CEK2)
         (displayln "Transformed")
         (pretty-print (solidify-language (current-language)))
-        (pretty-print CEK2))
-      #|
-      (define-values (CEK** mf*) (language->add-AU CEK* '()))
-      (displayln "Built.")
-      (parameterize ([current-language (heapify-language (current-language))])
-      (displayln "Heapified")
-      (define-values (CEK*** mf**)
-      (tc-language CEK** mf* Sτ))
+        (pretty-print CEK2)))))
 
-      (displayln "Checked.")
-      (report-all-errors CEK***)
-      (pretty-print CEK***)
-
-      (define-values (CEKi mfi) (join-rhs-clear-lhs CEK*** mf**))
-      (report-all-errors CEKi)
-      (pretty-print CEKi)
-
-      (language->mkV CEK* '() void))
-      |#
-)))
+(parameterize ([current-language
+                (parse-language
+                 #'([Expr (app Expr Expr) x (lam x Expr)]
+                    [(x) #:external Name]))])
+  (define e
+    ((tc-expr (hasheq 'x limp-default-deref-addr)
+              #hasheq())
+     (parse-expr #'(#:match x [(#:deref (#:cast Expr (app e0 e1)) #:explicit #:delay #:identity) e1]))))
+  (report-all-errors e)
+  (displayln "Little test")
+  (pretty-print e))
 
 (parameterize ([current-language
                 (parse-language

@@ -18,12 +18,13 @@
     [(Deref taddr ct)
      (PDeref (with-stx-stx pat) ct
              (coerce-pattern (pattern-replace-ct ct pat))
+             taddr
              #f)]
     [_
      ;; Not immediately dereferencing, so continue structurally
      (match pat
        ;; All implicit dereferences become explicit.
-       [(PDeref sy _ p imp) (PDeref sy ct* (coerce-pattern p) #f)]
+       [(PDeref sy _ p taddr imp) (PDeref sy ct* (coerce-pattern p) taddr #f)]
        [(PAnd sy _ ps) (PAnd sy ct* (map coerce-pattern ps))]
        [(PName sy _ x) (PName sy ct* x)]
        [(PVariant sy _ n ps) (PVariant sy ct* n (map coerce-pattern ps))]
@@ -69,19 +70,24 @@
      (define ctaddr (Check (normalize-taddr taddr)))
      (define x (gensym 'temp))
      (define a (gensym 'tempa))
+     (define e-coerced (coerce-expr (expr-replace-ct cτ e*)))
+     ;; Make a tidier translation if we would just rebind a name.
+     ;; There is no shadowing, so this is safe.
+     (define-values (bind ref)
+       (if (ERef? e-coerced)
+           (values '() e-coerced)
+           (values (list (Where sy (PName sy cτ x) e-coerced))
+                   (ERef sy cτ x))))
      (ELet sy
            ctaddr
-           (list (Where sy
-                        (PName sy cτ x)
-                        (coerce-expr (expr-replace-ct cτ e*)))
-                 (Where sy
-                        (PName sy ctaddr a)
-                        (EAlloc sy ctaddr tag))
-                 (Update sy (ERef sy ctaddr a) (ERef sy cτ x)))
+           (append bind
+                   (list (Where sy
+                         (PName sy ctaddr a)
+                         (EAlloc sy ctaddr tag))
+                  (Update sy (ERef sy ctaddr a) ref)))
            (ERef sy ctaddr a))]
     [_
-     (when (THeap? (πcc e))
-       (raise-syntax-error 'do-store "Expected coercion from tc" (with-stx-stx e)))
+     ;; Even if e is THeap, if the typechecker is correct, the coercion is deeper in the expression.
      #f]))
 
 (define (coerce-expr e)

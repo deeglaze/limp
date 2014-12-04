@@ -51,7 +51,9 @@ and semantics.
                                           ,(rec p))]
         [(PSet-with* _ _ v p) `(#:set-with* ,(rec v)
                                             ,(rec p))]
-        [(PDeref _ _ p imp) `(#:deref ,(rec p) ,@(if imp '(#:implicit) '()))]
+        [(PDeref _ _ p taddr imp) `(#:deref ,(rec p)
+                                            ,@(if taddr (list taddr) '())
+                                            ,@(if imp '(#:implicit) '()))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
         [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
         [(PIsAddr _ (Cast (TAddr: _ space mm em)))
@@ -95,7 +97,7 @@ and semantics.
 (struct PSet-with* Pattern (v p) #:transparent)
 (struct PTerm Pattern (t) #:transparent)
 ;; Expect an address always, so deref and continue matching.
-(struct PDeref Pattern (p implicit?) #:transparent)
+(struct PDeref Pattern (p taddr implicit?) #:transparent)
 ;; The info is in the type
 (struct PIsExternal Pattern () #:transparent)
 (struct PIsAddr Pattern () #:transparent)
@@ -112,7 +114,7 @@ pattern template:
     [(PSet-with sy ct v p) ???]
     [(PSet-with* sy ct v p) ???]
     [(PTerm sy ct t) ???]
-    [(PDeref sy ct p imp?) ???]
+    [(PDeref sy ct p taddr imp?) ???]
     [(PIsExternal sy ct) ???]
     [(PIsAddr sy ct) ???]
     [(PIsType sy ct) ???]
@@ -155,7 +157,7 @@ pattern template:
     [((PSet-with* _ ct v0 p0) (PSet-with* _ ct v1 p1))
      (sequence-pattern-α-equal? (list v0 p0) (list v1 p1) ρ0 ρ1)]
     [((PTerm _ ct t0) (PTerm _ ct t1)) (values ρ0 ρ1 (term-α-equal? t0 t1))]
-    [((PDeref _ ct p0 imp) (PDeref _ ct p1 imp)) (pattern-α-equal? p0 p1)]
+    [((PDeref _ ct p0 taddr imp) (PDeref _ ct p1 taddr imp)) (pattern-α-equal? p0 p1)]
     [((PIsExternal _ ct) (PIsExternal _ ct)) (values ρ0 ρ1 #t)]
     [((PWild _ ct) (PWild _ ct)) (values ρ0 ρ1 #t)]
     [((PIsAddr _ ct) (PIsAddr _ ct)) (values ρ0 ρ1 #t)]
@@ -566,7 +568,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (abstract-frees-in-term t names))]
-      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
+      [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]
@@ -585,7 +587,7 @@ expr template
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t names))]
-      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
+      [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]

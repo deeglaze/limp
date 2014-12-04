@@ -271,7 +271,7 @@
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (ht t))]
-      [(PDeref sy _ p imp) (PDeref sy ct* (self p) imp)]
+      [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
       [(PIsType sy _) (PIsType sy ct*)]

@@ -332,9 +332,20 @@ single address space
            #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
                                         (Cast (attribute t.t)))))
   (pattern (~and sy ((~var _ (pderef L))
-                     (~or (~optional (~and #:implicit implicit))
-                          (~once p)) ...))
-           #:attr pat (PDeref #'sy ct (attribute p.pat) (syntax? (attribute implicit))))
+                     (~or 
+                      (~once (~var modes (EM-Modes (Language-options L) #f #f)))
+                      (~optional (~or (~and #:explicit explicit)
+                                      (~and #:implicit implicit)))
+                      (~once p)) ...))
+           #:attr pat (PDeref #'sy ct (attribute p.pat)
+                              (if (or (syntax? (attribute explicit))
+                                      (syntax? (attribute implicit)))
+                                  (mk-TAddr #'modes
+                                            (attribute modes.space)
+                                            (attribute modes.mm)
+                                            (attribute modes.em))
+                                  generic-TAddr)
+                              (syntax? (attribute implicit))))
   (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))

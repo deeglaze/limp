@@ -163,6 +163,8 @@
 (struct TError (msgs) #:transparent
         #:methods gen:custom-write [(define write-proc write-type)])
 
+(define generic-TAddr (mk-TAddr #f #f #f #f))
+
 (define (*THeap who sy taddr tag τ)
   (when (THeap? τ) (error '*THeap "~a: bad construction ~a" who (list sy taddr tag τ)))
   (mk-THeap sy taddr tag τ))
