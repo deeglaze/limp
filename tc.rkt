@@ -24,12 +24,6 @@
 (define ((unbound-pat-var sy who x))
   (raise-syntax-error who (format "Unbound pattern variable: ~a" x) sy))
 
-(define (num-top-level-Λs τ)
-  (let count ([τ τ] [i 0])
-   (match τ
-     [(TΛ: _ _ (Scope σ)) (count σ (add1 i))]
-     [_ i])))
-
 (module+ test (require rackunit)
   ;; ∀pair = ΛXY. pair<X,Y>
   (define ∀pair
@@ -78,20 +72,6 @@
       [else (type-error "Expect ~a to be a subtype of ~a" τ σ)])]
     [_ (sub-t 'C τ #f)]))
 
-;; Repeatedly instantiate σ's Λs with τs until τs is empty.
-;; If τs not empty before σ is not a Λ, then invoke on-too-many.
-(define (repeat-inst σ τs
-                     [on-too-many
-                      (λ () (type-error "Instantiated type with too many variables: ~a (~a)" σ τs))])
-  (let loop ([σ σ] [τs τs])
-    (match τs
-      [(cons τ τs)
-       (match (resolve σ (Language-user-spaces (current-language)))
-         [(TΛ: _ x s)
-          (loop (open-scope s τ) τs)]
-         [_ (on-too-many)])]
-      [_ σ])))
-
 (define (tc-bu Γ Ξ bu path)
   (define tc-expr* (tc-expr Γ Ξ))
   (match bu
@@ -133,13 +113,13 @@
 ;; Reshaping must first reconcile with user annotations before continuing onward.
 (define (*reshape expected ct down-construction up-construction)
   (λ (shape-τ [tag #f])
-     (define ex* (if ct (resolve (type-meet expected (πct ct))) expected))
+     (define ex* (resolve (type-meet expected (if ct (πct ct) T⊤))))
      (define non-H (resolve (type-meet ex* shape-τ)))
      (cond
       [(T⊥? non-H)
        (cond
         ;; Downcast
-        [(THeap? shape-τ)
+        [(THeap? shape-τ) ;; Expect τ, have Hσ, so Hσ → τ (if σ ⊓ τ ≠ ⊥)
          (match (resolve (type-meet (heapify-generic expected) shape-τ))
            [(THeap: sy taddr tag* τ)
             (values tag*
@@ -148,7 +128,7 @@
                     τ)]
            [_ (values #f values values T⊥)])]
         ;; Upcast
-        [else
+        [else ;; Have τ, may
          (match (resolve (type-meet expected (heapify-generic shape-τ)))
            [(THeap: sy taddr tag* τ)
             (values tag*
@@ -158,6 +138,18 @@
            [_ (values #f values values T⊥)])])]
       [else (values #f values values non-H)])))
 
+(define (*safe-coerce expected ct down-construction up-construction)
+  (define reshape (*reshape expected ct down-construction up-construction))
+  
+  (define (safe-coerce ignore τ [tag #f])
+    (define-values (a b c τ*) (reshape T⊤ tag))
+    (if τ
+        (if (<:? τ τ*)
+            (values a b c τ)
+            (values #f values values T⊥))
+        (values a b c τ*)))
+  safe-coerce)
+
 (define (tc-pattern Γ Ξ pat expect)
   (define (tc Γ pat expect)
     (define ct (Typed-ct pat))
@@ -165,9 +157,14 @@
     (define reshape
       (*reshape expect
                 ct
-                ;; All upcasts are explicit with PDeref forms
-                (λ _ (λ (mkp0) (λ (ct) (mkp0 ct))))
-                (λ (Tsy taddr tag) (λ (mkp0) (λ (ct) (PDeref Tsy (mkp0 ct) taddr #t))))))
+                ;; All downcasts are explicit with PDeref forms
+                (λ _ values)
+                (λ (Tsy taddr tag)
+                   (λ (mkp0) (λ (ct) (mkp0 (type-error "Patterns cannot reshape into a heapified type")))))))
+    (define safe-coerce
+      (*safe-coerce expect ct
+                    (λ _ values)
+                    (λ (mkp0) (λ (ct) (mkp0 (type-error "Patterns cannot coerce into a heapified type"))))))
     (define-values (delegated? Γ* mkp op-τ op-ct)
       (match pat
         [(PAnd sy _ ps)
@@ -181,18 +178,19 @@
               (tcp* Γ* ps (cons p* rev-ps*) (type-meet τ expect))]))]
 
         [(PName sy _ x)
-         (define ex (hash-ref Γ x T⊤))
-         (define-values (tag W TW τ*) (reshape ex))
+         (define ex (hash-ref Γ x #f))
+         (define-values (tag W TW τ*) (safe-coerce x ex))
          (define err
               (and (T⊥? τ*)
                    (type-error "~a ~a: ~a (type: ~a, expected overlap ~a)"
                                "Non-linear Name pattern has"
                                "non-overlapping initial type and expected overlapping type"
                                pat ex expect)))
+         (define τout (TW τ*))
          (values #t
-                 (hash-set Γ x τ*)
+                 (hash-set Γ x τout)
                  (W (λ (ct) (PName sy ct x)))
-                 (and (not err) τ*)
+                 (and (not err) τout)
                  err)]
 
         [(PVariant sy _ n ps)
@@ -282,7 +280,7 @@
          (define t* (tc-term Γ Ξ t expect))
          (values #f Γ (λ (ct) (PTerm sy ct t*)) #f (Typed-ct t*))]
         [(or (? PWild?) (? PIsExternal?) (? PIsAddr?) (? PIsType?))
-         (values #f Γ (λ (ct) (replace-ct ct pat)) T⊤ #f)]
+         (values #f Γ (λ (ct) (replace-ct ct pat)) #f #f)]
         [_ (error 'tc-pattern "Unsupported pattern: ~a" pat)]))
 
     (define (chk τ) (coerce-check-expect ct expect τ))
@@ -291,7 +289,7 @@
       [delegated? (mkp (or op-ct (chk op-τ)))]
       [else
        ;; XXX: I don't think this preserves the `Cast`ness of a Term.
-       (define-values (tag* W TW τ) (reshape (or op-τ (πct op-ct))))
+       (define-values (tag* W TW τ) (safe-coerce pat (or op-τ (πct op-ct))))
        ((W mkp) (chk (TW τ)))])))
   (tc Γ pat expect))
 
@@ -338,10 +336,12 @@
 (define (explicit-tag tag tail)
   (and tag (not (implicit-tag? tag)) (cons tail tail)))
 
+;; Hτ → τ
 (define (((down-expr-construction sy taddr tag) constr) ct)
   (define e (constr ct))
   (EStore-lookup (with-stx-stx e) ct e (get-option 'lm) taddr))
 
+;; τ → Hτ
 (define (((up-expr-construction sy taddr tag) constr) ct)
   (define e (constr ct))
   (EHeapify (with-stx-stx e) ct e taddr tag))
@@ -356,6 +356,9 @@
     (define reshape (*reshape expected ct
                               down-expr-construction
                               up-expr-construction))
+    (define safe-coerce (*safe-coerce expected ct
+                                      down-expr-construction
+                                      up-expr-construction))
     (define stx (with-stx-stx e))
     #|
     There are a few general cases to consider during checking.
@@ -374,8 +377,13 @@
         [(EVariant sy _ n tag τs es)
          ;; Find all the n-named variants and find which makes sense.
          (define arity (length es))
-         (define generic (generic-variant n arity))
-         (define-values (tag* W TW τ) (reshape generic (or tag tagged path)))
+         (define-values (tag* W TW eτ) (reshape T⊤ (or tag tagged path)))
+         (define upper-bound (generic-variant n arity))
+         (define possible-σs
+           (for*/list ([τ (lang-variants-of-arity upper-bound)]
+                       [σ (in-value (apply-annotation τs τ))]
+                       #:when σ)
+             σ))
          ;; If we expect a type, we have a cast or explicit check, then use those rather than
          ;; an inferred variant type.
          (define (do σs tr)
@@ -393,33 +401,26 @@
                               ct)
                           n (give-tag tag* path) τs es*)))
            (values (W mk-e0) (TW (mk-TVariant #f n (map πcc es*) tr))))
-         (define (infer)
-           (define possible-σs (lang-variants-of-arity generic))
-           (define-values (mk-e op-τ)
+         (define-values (mk-e op-τ)
              (for*/fold ([mk-e #f]
                          [op-τ #f])
                  ([σ (in-list possible-σs)] #:break mk-e)
                (let/ec break
-                 (match (repeat-inst σ τs (λ () (break #f #f)))
+                 (match σ
                    [(TVariant: _ _ σs tr) ;; We know |σs| = |es| by possible-σs def.
                     (parameterize ([type-error-fn (λ _ (break #f #f))])
                       (do σs tr))]
                    [_ (values #f #f)]))))
-           (if mk-e
-               (values #t mk-e op-τ #f)
-               ;; Check subexpressions, but on the whole this doesn't work.
-               (values #t
-                       (λ (ct)
-                          (EVariant sy ct n tag* τs
-                                    (for/list ([e (in-list es)]
-                                               [i (in-naturals)])
-                                      (tc-expr* e T⊤ `((,n . ,i) . ,path)))))
-                       #f (type-error "No variant type matched"))))
-         (match τ
-           [(TVariant: _ _ σs tr)
-            (define-values (mk-e op-τ) (do σs tr))
-            (values #t mk-e op-τ #f)]
-           [_ (infer)])]
+         (if mk-e
+             (values #t mk-e op-τ #f)
+             ;; Check subexpressions, but on the whole this doesn't work.
+             (values #t
+                     (λ (ct)
+                        (EVariant sy ct n tag* τs
+                                  (for/list ([e (in-list es)]
+                                             [i (in-naturals)])
+                                    (tc-expr* e T⊤ `((,n . ,i) . ,path)))))
+                     #f (type-error "No variant type matched")))]
 
         [(EStore-lookup sy _ k lm imp)
          ;; k has an expected type if this is an implicit lookup
@@ -460,8 +461,25 @@
          (define k* (tc-expr* k d (cons 'extend-key path) #:tagged (explicit-tag tag* 0)))
          (define v* (tc-expr* v r (cons 'extend-value path) #:tagged (explicit-tag tag* 1)))
          (define mk-e0 (λ (ct) (EExtend sy ct m* (give-tag tag* path) k* v*)))
-         (values #t (W mk-e0) (TW (type-join (πcc m*) (W (mk-TMap #f (πcc k*) (πcc v*) ext)))) #f)]
+         (values #t (W mk-e0) (TW (type-join (πcc m*) (mk-TMap #f (πcc k*) (πcc v*) ext))) #f)]
 
+        [(ESet-add sy _ e tag es)
+         (define-values (tag* W TW τ)
+           (reshape generic-set (or tag tagged path)))
+         (define-values (v ext)
+           (match τ
+             [(TSet: _ v ext) (values v ext)]
+             [_ (values T⊤ 'dc)]))
+         (define e* (tc-expr* e τ `((set-add . 0) . ,path)))
+         (define es*
+           (for/list ([e (in-list es)]
+                      [i (in-naturals 1)])
+             (tc-expr* e v `((set-add . ,i) . ,path) #:tagged (explicit-tag tag i))))
+         (define mk-e (λ (ct) (ESet-add sy ct e* (give-tag tag path) es*)))
+         (values #t (W mk-e)
+                 (TW (for/fold ([τ (πcc e*)]) ([e (in-list es*)])
+                       (type-join τ (mk-TSet #f (πcc e) 'dc))))
+                 #f)]
         #|Delegating forms|#
         [(ELet sy _ bus body)
          (define-values (Γ* bus*) (tc-bus Γ Ξ bus 'let-bu path))
@@ -485,7 +503,7 @@
          ;; We monomorphize as well as check the function.
          (define mfτ (hash-ref Ξ mf (unbound-mf sy 'tc-expr mf)))
          ;; instantiate with all given types, error if too many
-         (define inst (repeat-inst mfτ τs))
+         (define inst (apply-annotation τs mfτ))
          ;; also error if too few
          (define-values (dom-σs rng)
            (cond
@@ -560,19 +578,7 @@
                  (for/fold ([τ T⊥]) ([e (in-list es*)])
                    (type-join τ (πcc e)))
                  #f)]
-
-        [(ESet-add sy _ e tag es)
-         (define e* (tc-expr* e generic-set `((set-add . 0) . ,path)))
-         (define es*
-           (for/list ([e (in-list es)]
-                      [i (in-naturals 1)])
-             (tc-expr* e T⊤ `((set-add . ,i) . ,path) #:tagged (explicit-tag tag i))))
-         (define mk-e (λ (ct) (ESet-add sy ct e* (give-tag tag path) es*)))
-         (values #f mk-e
-                 (for/fold ([τ (πcc e*)]) ([e (in-list es*)])
-                   (type-join τ (mk-TSet #f (πcc e) 'dc)))
-                 #f)]
-
+ 
         [(ESet-intersection sy _ e es)
          (match-define (cons e* es*)
                        (for/list ([e (in-list (cons e es))]
@@ -601,6 +607,7 @@
                       (type-error "Expected a map type: ~a" τ))])]
         [(EMap-has-key sy _ m k) (error 'tc-expr "Todo: map-has-key?")]
         [(EMap-remove sy _ m k) (error 'tc-expr "Todo: map-remove")]
+        [(EUnquote sy _ e) (values #f (λ (ct) (EUnquote sy ct e)) #f #f)]
         [_ (error 'tc-expr "Unrecognized expression form: ~a" e)]))
 
     (define (chk τ) (coerce-check-expect ct expected τ))
@@ -609,7 +616,7 @@
      [else
       ;; XXX: What about `Cast`ness of op-ct?
       (define-values (tag* W TW τ)
-        (reshape (or op-τ (πct op-ct)) (or tagged path)))
+        (safe-coerce e (or op-τ (πct op-ct)) (or tagged path)))
       ((W mk-e) (chk (TW τ)))]))
   (tc-expr* e expected path))
 

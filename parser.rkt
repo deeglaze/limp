@@ -399,15 +399,28 @@ single address space
            #:when ext
            #:attr tm (External #'v ext #'v)))
 
+(define-syntax-class (Type-or-implicit L)
+  #:attributes (τ-or-implicit)
+  (pattern (~var t (Type-cls #t L))
+           #:attr τ-or-implicit (attribute t.t))
+  (pattern (~datum _) #:attr τ-or-implicit #f))
+
+(define-splicing-syntax-class (Annotation L)
+  #:attributes (τ-or-implicits)
+  (pattern (~seq #:inst [(~var ts (Type-or-implicit L)) ...])
+           #:attr τ-or-implicits (attribute ts.τ-or-implicit))
+  (pattern (~seq) #:attr τ-or-implicits #f))
+
 (define-syntax-class (Expression-cls L ct)
   #:attributes (e)
   #:local-conventions ([#rx"^e" (Expression-cls L #f)]
                        [#rx"^r" (Rule-cls #f L)])
-  (pattern (~and sy (#:call f:id (~optional (~seq #:inst [(~var ts (Type-cls #t L)) ...]))
+  (pattern (~and sy (#:call f:id
+                            (~var ann (Annotation L))
                             es ...))
            #:attr e (ECall #'sy ct
                            (syntax-e #'f)
-                           (or (attribute ts.t) '())
+                           (attribute ann.τ-or-implicits)
                            (attribute es.e)))
   (pattern (~and sy (#:lookup ek (~optional mode:Lookup-Mode)
                               (~optional (~seq (~and #:implicit implicit)
@@ -446,12 +459,13 @@ single address space
   (pattern (~and sy #:empty-set) #:attr e (EEmpty-Set #'sy (TSet T⊥ #f)))
   (pattern (~and sy (#:add es ev))
            #:attr e (ESet-add #'sy ct (attribute es.e) (attribute ev.e)))
-  (pattern (~and sy (n:id (~or (~optional (~seq #:tag tag:expr)) es) ...))
+  (pattern (~and sy (n:id (~var ann (Annotation L))
+                          (~or (~optional (~seq #:tag tag:expr)) es) ...))
            #:attr e (EVariant #'sy
                               ct
                               (syntax-e #'n)
                               (let ([t (attribute tag)]) (and t (syntax->datum t)))
-                              '() ;; TODO: Type instantiations
+                              (attribute ann.τ-or-implicits)
                               (attribute es.e)))
   ;; TODO: use some binding environment? Check afterwards?
   (pattern x:id #:attr e (ERef #'x ct (syntax-e #'x)))
@@ -472,6 +486,8 @@ single address space
            #:attr e (EMap-has-key #'sy ct (attribute em.e) (attribute ek.e)))
   (pattern (~and sy (#:map-remove em ek))
            #:attr e (EMap-remove #'sy ct (attribute em.e) (attribute ek.e)))
+  (pattern (~and sy ((~datum unquote) u:expr))
+           #:attr e (EUnquote #'sy ct #'u))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var ea (Expression-cls L (Check (attribute t.t)))))
            #:attr e (attribute ea.e))

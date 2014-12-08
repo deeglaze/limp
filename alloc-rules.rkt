@@ -173,6 +173,7 @@
        (define x* (if (try-alloc? τ tr)
                       (gensym x)
                       (cons 'trusted (gensym x))))
+       (printf "From heapify ~a~%" x*)
        (mk-Tμ sy x (abstract-free (self (open-scope st (mk-TFree sy x*))) x*) tr n)]
       ;; a quantified type is just all the known instantiations' heapifications.
       [(TΛ: sy x st)
@@ -188,6 +189,7 @@
        (error 'self-referential? "We shouldn't see deBruijn indices here ~a" τ)]
       [_ (error 'heapify-τ "Bad type ~a" τ)]))
   (self τ))
+(trace heapify-τ)
 
 (define (heapify-language L heapify-nonrec?)
   (define us (Language-ordered-us L))
@@ -214,14 +216,16 @@
   (define hbus (heapify-bus vtaddr etaddr staddr heapify-nonrec?))
   (define hrules (heapify-rules vtaddr etaddr staddr heapify-nonrec?))
   (define hct (heapify-ct vtaddr etaddr staddr heapify-nonrec?))
+  (define (hannot τs)
+    (and (list? τs) (for/list ([τ (in-list τs)]) (and τ (hτ τ)))))
   (define (self e)
     (define ct (Typed-ct e))
     (define ct* (hct ct))
     (match e
       [(ECall sy _ mf τs es)
-       (ECall sy ct* mf (map hτ τs) (map self es))]
+       (ECall sy ct* mf (hannot τs) (map self es))]
       [(EVariant sy _ n tag τs es)
-       (EVariant sy ct* n tag (map hτ τs) (map self es))]
+       (EVariant sy ct* n tag (hannot τs) (map self es))]
       [(ERef sy _ x) (ERef sy ct* x)]
       [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
@@ -239,6 +243,7 @@
       [(EMap-has-key sy _ m k) (EMap-has-key sy ct* (self m) (self k))]
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
       [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
+      [(EUnquote sy _ e) (EUnquote sy ct* e)]
       [_ (error 'heapify-expr "Unrecognized expression form: ~a" e)]))
   self)
 

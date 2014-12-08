@@ -593,7 +593,7 @@
                 ;; Record the type instantiations for later transformations.
                 (define u* (reset u))
                 (define inst (instantiations))
-                (when inst (hash-add! inst lam u*))
+                (when (and inst (mono-type? u*)) (hash-add! inst lam u*))
                 (reset (open-scope st u))]
                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
             [(TUnif τ) (reset τ)]
@@ -684,8 +684,7 @@
       (or m0 m1)
       'default))
 
-(define (type-join τ σ)
-  (define us (Language-user-spaces (current-language)))
+(define (type-join-aux us)
   (define (⊔ τ σ ρ)
     (define (join-named x σ)
       (match (hash-ref ρ x #f)
@@ -715,8 +714,8 @@
          #:when (and (= (length τs) (length σs))
                      (implies (and tr0 tr1) (equal? tr0 tr1)))
          (mk-TVariant #f n (for/list ([τ (in-list τs)]
-                                   [σ (in-list σs)])
-                          (⊔ τ σ ρ))
+                                      [σ (in-list σs)])
+                             (⊔ τ σ ρ))
                       (⊔trust tr1 tr0))]
         ;; Make Λs agree on a name and abstract the result.
         [((TΛ: _ x st) (TΛ: _ _ ss))
@@ -781,18 +780,20 @@
              (*TRUnion #f (list τ σ))
              (mk-TAddr #f space mm em))]
         [(_ _) (*TRUnion #f (list τ σ))])]))
-  (freeze (⊔ τ σ #hasheq())))
+  ⊔)
+(define (type-join τ σ)  
+  (freeze ((type-join-aux (Language-user-spaces (current-language))) τ σ #hasheq())))
 
-(define (type-join* τs)
+(define (type-join* τs [ρ #hasheq()] #:no-freeze? [no-freeze? #f])
+  (define tj (type-join-aux (Language-user-spaces (current-language))))
   (define (rec τs acc)
     (match τs
-      ['() acc]
-      [(cons τ τs) (rec τs (type-join τ acc))]))
+      ['() (if no-freeze? acc (freeze acc))]
+      [(cons τ τs*) (rec τs* (tj τ acc ρ))]))
   (rec τs T⊥))
 
-(define (type-meet τ σ)
-  ;; potentially creates several equal but differently named types.
-  (define us (Language-user-spaces (current-language)))
+;; Doesn't freeze afterwards
+(define (type-meet-aux us)
   (define (⊓ τ σ ρ)
     (define (meet-named x σ)
       (match (hash-ref ρ x #f)
@@ -839,11 +840,13 @@
        [(_ (? TUnif?)) (unify σ τ)]
        ;; distribute unions
        [((or (TRUnion: _ ts) (TSUnion: _ ts)) _)
-        (*TRUnion #f (for/list ([t (in-list ts)])
-                       (⊓ t σ ρ)))]
+        (type-join* (for/list ([t (in-list ts)])
+                       (⊓ t σ ρ))
+                    ρ #:no-freeze? #t)]
        [(_ (or (TRUnion: _ ts) (TSUnion: _ ts)))
-        (*TRUnion #f (for/list ([t (in-list ts)])
-                       (⊓ τ t ρ)))]
+        (type-join* (for/list ([t (in-list ts)])
+                      (⊓ τ t ρ))
+                    ρ #:no-freeze? #t)]
        ;; map and set are structural
        [((TMap: _ fd fr fext) (TMap: _ td tr text))
         (mk-TMap #f (⊓ fd td ρ)
@@ -889,16 +892,21 @@
        [(_ _)
         (unless (and τ σ) (error 'type-meet "Bad type ~a ~a" τ σ))
         T⊥])]))
-  (define out (freeze (⊓ τ σ #hasheq())))
-  (when (T⊥? (resolve out))
-    (printf "Meet produced bottom from ~a, ~a~%" τ σ))
-  out)
+  ⊓)
 
-(define (type-meet* τs)
+(define (type-meet τ σ)
+  (define res (freeze ((type-meet-aux (Language-user-spaces (current-language))) τ σ #hasheq())))
+  (when (T⊥? res)
+    (printf "Meet ⊥: ~a, ~a~%" τ σ))
+  res)
+
+(define (type-meet* τs [ρ #hasheq()] #:no-freeze? [no-freeze? #f])
+  (define tm (type-meet-aux (Language-user-spaces (current-language))))
   (let rec ([τs τs] [acc T⊤])
    (match τs
-     ['() acc]
-     [(cons τ τs) (rec τs (type-meet τ acc))])))
+     ['() (if no-freeze? acc (freeze acc))]
+     [(cons τ τs)
+      (rec τs (tm τ acc ρ))])))
 
 ;; τ is castable to σ if τ <: σ, τ = ⊤,
 ;; or structural components of τ are castable to structural components of σ.
@@ -996,6 +1004,38 @@
            [(or (TRUnion: _ ts) (TSUnion: _ ts)) (collect* ts found)]
            [_ found])]))
      (reverse (collect τ '() '() found)))))
+
+;; Repeatedly instantiate σ's Λs with τs until τs is empty.
+;; If τs not empty before σ is not a Λ, then invoke on-too-many.
+(define (repeat-inst σ τs
+                     [on-too-many
+                      (λ _ #f)])
+  (let loop ([σ σ] [τs τs])
+    (match τs
+      [(cons τ τs)
+       (match (resolve σ)
+         [(TΛ: _ x s)
+          (loop (open-scope s τ) τs)]
+         [_ (on-too-many)])]
+      [_ σ])))
+
+(define (num-top-level-Λs τ)
+  (let count ([τ τ] [i 0])
+   (match (resolve τ)
+     [(TΛ: _ _ (Scope σ)) (count σ (add1 i))]
+     [_ i])))
+
+;; Create unification variables for implicit types.
+;; If over- or under-instantiated, return #f.
+(define (apply-annotation τs τ)
+  (define τs*
+    (if (list? τs)
+        (for/list ([τ (in-list τs)])
+          (or τ (TUnif T⊤)))
+        (build-list (num-top-level-Λs τ) (λ _ (TUnif T⊤)))))
+  (define possible-out (repeat-inst τ τs*))
+  (and (not (TΛ? (resolve possible-out))) ;; should be fully instantiated
+       possible-out))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

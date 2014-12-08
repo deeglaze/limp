@@ -68,9 +68,10 @@ Example:
                 [(? needs-resolve?) (rec (resolve t))]
                 ;; names are introduced by a μ, and trusted if the name is not a symbol
                 [(TFree: _ n) (symbol? n)]
+                [(? T⊤?) #t]
                 [(or (? TBound?))
                  (error 'self-referential? "We shouldn't see names here ~a" t*)]
-                [_ (error 'type->edges "Bad type ~a" t)])])))
+                [_ (error 'self-referential? "Bad type ~a" t)])])))
         (hash-set! self-referential t b)
         b)))
 

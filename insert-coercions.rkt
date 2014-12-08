@@ -133,7 +133,7 @@
              (EMap-has-key sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
             [(EMap-remove sy ct m k)
              (EMap-remove sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?))
+            [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?) (? EUnquote?))
              e]
             [_ (error 'coerce-expr "Unrecognized expression form: ~a" e)]))))
 
