@@ -13,6 +13,7 @@
 
 (define (coerce-pattern pat)
   (define ct (Typed-ct pat))
+  (printf "pattern~%")
   (define ct* (deheapify-ct ct))
   (match ct
     [(Deref taddr ct)
@@ -66,6 +67,7 @@
 (define (do-store e)
   (match e
     [(EHeapify sy ct e* taddr tag)
+     (printf "heapify~%")
      (define cτ (deheapify-ct ct))
      (define ctaddr (Check (normalize-taddr taddr)))
      (define x (gensym 'temp))
@@ -95,47 +97,49 @@
   (if e*
       (coerce-expr e*)
       (or (do-store e)
-          (match e
-            ;; 
-            [(EStore-lookup sy ct k lm imp)
-             (when imp (error 'coerce-expr "Must be done with do-deref ~a" e))
-             (EStore-lookup sy (deheapify-ct ct) (coerce-expr k) lm #f)]
-            [(? EHeapify?)
-             (error 'coerce-expr "Should be removed: ~a" e)]
-            ;; Structurally coerce
-            [(EVariant sy ct n tag τs es)
-             (EVariant sy (deheapify-ct ct) n tag τs (map coerce-expr es))]
-            [(EExtend sy ct m tag k v)
-             (EExtend sy (deheapify-ct ct) (coerce-expr m) tag
-                      (coerce-expr k)
-                      (coerce-expr v))]
-            [(ESet-add sy ct e tag es)
-             (ESet-add sy (deheapify-ct ct) (coerce-expr e) tag
-                       (map coerce-expr es))]
+          (let* ([ct (Typed-ct e)]
+                 [ct* (begin (displayln "Expr") (deheapify-ct ct))])
+            (match e
+              ;; 
+              [(EStore-lookup sy _ k lm imp)
+               (when imp (error 'coerce-expr "Must be done with do-deref ~a" e))
+               (EStore-lookup sy ct* (coerce-expr k) lm #f)]
+              [(? EHeapify?)
+               (error 'coerce-expr "Should be removed: ~a" e)]
+              ;; Structurally coerce
+              [(EVariant sy _ n tag τs es)
+               (EVariant sy ct* n tag τs (map coerce-expr es))]
+              [(EExtend sy _ m tag k v)
+               (EExtend sy ct* (coerce-expr m) tag
+                        (coerce-expr k)
+                        (coerce-expr v))]
+              [(ESet-add sy _ e tag es)
+               (ESet-add sy ct* (coerce-expr e) tag
+                         (map coerce-expr es))]
 
-            [(ECall sy ct mf τs es)
-             (ECall sy (deheapify-ct ct) mf τs (map coerce-expr es))]
-            [(ELet sy ct bus body)
-             (ELet sy (deheapify-ct ct) (map coerce-bu bus) (coerce-expr body))]
-            [(EMatch sy ct de rules)
-             (EMatch sy (deheapify-ct ct) (coerce-expr de) (map coerce-rule rules))]
-            [(ESet-union sy ct es)
-             (ESet-union sy (deheapify-ct ct) (map coerce-rule es))]
-            [(ESet-intersection sy ct e es)
-             (ESet-intersection sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
-            [(ESet-subtract sy ct e es)
-             (ESet-subtract sy (deheapify-ct ct) (coerce-expr e) (map coerce-expr es))]
-            [(ESet-member sy ct e v)
-             (ESet-member sy (deheapify-ct ct) (coerce-expr e) (coerce-expr v))]
-            [(EMap-lookup sy ct m k)
-             (EMap-lookup sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(EMap-has-key sy ct m k)
-             (EMap-has-key sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(EMap-remove sy ct m k)
-             (EMap-remove sy (deheapify-ct ct) (coerce-expr m) (coerce-expr k))]
-            [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?) (? EUnquote?))
-             e]
-            [_ (error 'coerce-expr "Unrecognized expression form: ~a" e)]))))
+              [(ECall sy _ mf τs es)
+               (ECall sy ct* mf τs (map coerce-expr es))]
+              [(ELet sy _ bus body)
+               (ELet sy ct* (map coerce-bu bus) (coerce-expr body))]
+              [(EMatch sy _ de rules)
+               (EMatch sy ct* (coerce-expr de) (map coerce-rule rules))]
+              [(ESet-union sy _ es)
+               (ESet-union sy ct* (map coerce-rule es))]
+              [(ESet-intersection sy _ e es)
+               (ESet-intersection sy ct* (coerce-expr e) (map coerce-expr es))]
+              [(ESet-subtract sy _ e es)
+               (ESet-subtract sy ct* (coerce-expr e) (map coerce-expr es))]
+              [(ESet-member sy _ e v)
+               (ESet-member sy ct* (coerce-expr e) (coerce-expr v))]
+              [(EMap-lookup sy _ m k)
+               (EMap-lookup sy ct* (coerce-expr m) (coerce-expr k))]
+              [(EMap-has-key sy _ m k)
+               (EMap-has-key sy ct* (coerce-expr m) (coerce-expr k))]
+              [(EMap-remove sy _ m k)
+               (EMap-remove sy ct* (coerce-expr m) (coerce-expr k))]
+              [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?) (? EUnquote?))
+               e]
+              [_ (error 'coerce-expr "Unrecognized expression form: ~a" e)])))))
 
 (define (coerce-bu bu)
   (match bu

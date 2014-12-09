@@ -38,11 +38,13 @@
           'em limp-default-em
           'addr-space limp-default-addr-space
           'lm limp-default-lookup-mode
-          'externalize limp-externalize-default))
+          'externalize limp-externalize-default
+          'check-casts #t))
 
 (define L₀
   (Language defaults ⊥ (make-hash) '() ∅ ⊥ (make-hash)))
 (define current-language (make-parameter L₀))
+(define check-for-heapification? (make-parameter #f))
 
 (define (get-option op #:use [u (current-language)])
   (define ops (cond

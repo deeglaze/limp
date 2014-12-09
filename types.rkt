@@ -3,7 +3,7 @@
          (only-in racket/bool implies)
          (only-in racket/function const)
          racket/list racket/match racket/set (only-in racket/function curry)
-         racket/trace
+         racket/trace racket/pretty
          (only-in unstable/sequence in-pairs)
          "common.rkt" "language.rkt")
 (provide (all-defined-out))
@@ -376,7 +376,46 @@
     [(TMap: sy t-dom t-rng ext) (mk-TMap sy (freeze t-dom) (freeze t-rng) ext)]
     [(TSet: sy t ext) (mk-TSet sy (freeze t) ext)]
     [(THeap: sy taddr tag τ) (*THeap 'freeze sy taddr tag (freeze τ))]
+    [(TArrow: sy dom rng) (mk-TArrow sy (freeze dom) (freeze rng))]
     [_ (error 'freeze "Bad type ~a" t)]))
+
+;; Remove heapification annotations
+(define (unannotate t)
+  (match t
+    [(THeap: _ _ _ τ) (unannotate τ)]
+    ;; boilerplate
+    [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (unannotate t)) tr n)]
+    [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (unannotate t)))]
+    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
+    ;; Resimplify, since unification may have bumped some stuff up.
+    [(TSUnion: sy ts) (*TSUnion sy (map unannotate ts))]
+    [(TRUnion: sy ts) (*TRUnion sy (map unannotate ts))]
+    [(TCut: sy t u) (mk-TCut sy (unannotate t) (unannotate u))]
+    [(TVariant: sy name ts tr) (*TVariant sy name (map unannotate ts) tr)]
+    [(TMap: sy t-dom t-rng ext) (mk-TMap sy (unannotate t-dom) (unannotate t-rng) ext)]
+    [(TSet: sy t ext) (mk-TSet sy (unannotate t) ext)]
+    [(TArrow: sy dom rng) (mk-TArrow sy (unannotate dom) (unannotate rng))]
+    [_ (error 'unannotate "Bad type ~a" t)]))
+
+;; Change free variables to ⊤
+(define (free->x x t)
+  (let self ([t t])
+    (match t
+      [(? TFree?) x]
+      ;; boilerplate
+      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (self t)) tr n)]
+      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (self t)))]
+      [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
+      ;; Resimplify, since unification may have bumped some stuff up.
+      [(TSUnion: sy ts) (*TSUnion sy (map self ts))]
+      [(TRUnion: sy ts) (*TRUnion sy (map self ts))]
+      [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
+      [(TVariant: sy name ts tr) (*TVariant sy name (map self ts) tr)]
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (self t-dom) (self t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (self t) ext)]
+      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (self τ))]
+      [(TArrow: sy dom rng) (mk-TArrow sy (self dom) (self rng))]
+      [_ (error 'free->x "Bad type ~a" t)])))
 
 (define ff (cons #f #f))
 ;; Abstract inside-out. Give cosmetic names for better readability and equality checking.
@@ -966,6 +1005,7 @@
 (define (lang-variants-of-arity upper-bound)
   (define us (Language-ordered-us (current-language)))
   (define seen (mutable-seteq))
+  (define more-upper (free->x T⊤ upper-bound))
   (reverse
    (for/fold ([found '()])
        ([nu (in-list us)])
@@ -985,7 +1025,7 @@
          (match τ
            [(TVariant: _ n* ts tr)
             (define found*
-              (if (<:? τ upper-bound) ;; But what if we need to unify?
+              (if (<:? (free->x T⊥ τ) more-upper) 
                   (cons (quantify-frees τ TVs #:names Name-TVs) found)
                   found))
             (collect* ts found*)]
@@ -1035,7 +1075,7 @@
         (build-list (num-top-level-Λs τ) (λ _ (TUnif T⊤)))))
   (define possible-out (repeat-inst τ τs*))
   (and (not (TΛ? (resolve possible-out))) ;; should be fully instantiated
-       possible-out))
+       (freeze possible-out)))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

@@ -37,10 +37,10 @@ and semantics.
   (let rec ([p p])
     (define sexp
       (match p
-        [(PAnd _ _ ps) `(and . ,(map rec ps))]
+        [(PAnd _ _ (? list? ps)) `(and . ,(map rec ps))]
         [(PName _ _ x) x]
         [(PWild _ _) '_]
-        [(PVariant _ _ n ps) `(,n . ,(map rec ps))]
+        [(PVariant _ _ n (? list? ps)) `(,n . ,(map rec ps))]
         [(PMap-with _ _ k v p) `(#:map-with ,(rec k)
                                             ,(rec v)
                                             ,(rec p))]
@@ -240,7 +240,7 @@ term template
         [(ECall _ _ mf τs es) `(,mf . ,(map rec es))]
         [(EVariant _ _ n tag τs es) `(,n ,@(do-tag tag) . ,(map rec es))]
         [(ERef _ _ x) x]
-        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(and lm (s->k lm)) ,@(if imp '(#:implicit ,imp) '()))]
+        [(EStore-lookup _ _ k lm imp) `(#:lookup ,(rec k) ,(and lm (s->k lm)) ,@(if imp `(#:implicit ,imp) '()))]
         [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
          `(#:alloc ,@(do-tag tag) ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]

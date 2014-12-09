@@ -88,7 +88,8 @@ single address space
         (mk-TExternal x sym)]
        [else
         (mk-TFree x sym)]))
-    (if taddr
+    ;; XXX: might not be the best place to decide if annotations are respected?
+    (if (and taddr (check-for-heapification?))
         (*THeap '->ref x taddr #f τ) ;; No tag in types.
         τ)))
 

@@ -126,7 +126,7 @@
             (co κ (Clo y e ρ))]
      [#:--> #:name var-lookup
             (ev (#:and (#:has-type Name) x) ρ κ)
-            (co κ (#:lookup (#:map-lookup ρ x) #:implicit))]
+            (#:ann State (co κ (#:cast Value (#:map-lookup ρ x))))]
 
      [#:--> (co (Cons (ar e ρ) (#:deref κ #:implicit)) v)
             (ev e ρ (Cons (fn v) κ))]
@@ -162,6 +162,7 @@
             (tc-language CEK '() Sτ)))  ;  (pretty-print CEK*)
 
         (pretty-print CEK*)
+        (displayln "Reporting for heapification")
         (report-all-errors CEK*)
         (define-values (CEK2 metafunctions2)
           (coerce-language CEK* metafunctions*))
@@ -246,9 +247,13 @@
                 [(extend* ρ (TCons a as) (TCons b bs))
                  (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)]))))
 
+ (displayln "Last one")
+
  
  (define-values (CESK* metafunctions*)
    (tc-language CESK metafunctions Sτ))
+ (pretty-print metafunctions*)
+ (pretty-print CESK*)
 
  (report-all-errors
   (append (append-map (compose peel-scopes Metafunction-rules) metafunctions*)

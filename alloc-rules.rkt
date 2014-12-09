@@ -328,11 +328,13 @@
     [(TRUnion: sy ts) (*TRUnion sy (map solidify-τ ts))]
     [(TCut: sy t u) (mk-TCut sy (solidify-τ t) (solidify-τ u))]
     [_ (error 'solidify-τ "Bad type ~a" τ)]))
+(trace solidify-τ)
 
 (define (solidify-language L)
   (define us (Language-ordered-us L))
   (define ordered
     (for/list ([(name ty) (in-dict us)])
+      (printf "Solidifying ~a, ~a~%" name ty)
       (cons name (solidify-τ ty))))
   (struct-copy Language L
                [user-spaces (make-hash ordered)]
