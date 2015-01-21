@@ -1,25 +1,49 @@
-#lang racket/base
-(require (for-syntax racket/base) racket/match racket/list racket/set)
+#lang typed/racket/base
+(require (for-syntax racket/base)
+         racket/match racket/list racket/set)
+(require/typed racket/pretty [pretty-print (-> Any Void)])
 
 (define-syntax (??? stx) #'(error 'todo))
 
+(: set-smap : (All (A B) (-> (Setof A) (-> A B) (Setof B))))
 (define (set-smap S f)
-  (for/set ([x (in-set S)]) (f x)))
+  (for/fold ([b : (Setof B) (set)]) ([x (in-set S)]) (set-add b (f x))))
 
+(: hash-set-many : (All (A B) (-> (HashTable A B) (Listof A) (Listof B) (HashTable A B))))
+(define (hash-set-many ρ xs ys)
+  (for/fold ([ρ : (HashTable A B) ρ])
+      ([x (in-list xs)]
+       [y (in-list ys)])
+    (hash-set ρ x y)))
+
+(: map-union : (All (A B) (-> (Setof B) (Listof A) (-> A (Setof B)) (Setof B))))
 (define (map-union base lst f)
-  (for/fold ([S base]) ([x (in-list lst)]) (set-union S (f x))))
+  (for/fold ([S : (Setof B) base]) ([x (in-list lst)])
+    (set-union S (f x))))
 
 ;; Raw implementation first to play with.
 
+(define-type Module Symbol)
+(define-type Label Symbol)
+
 ;; Expressions
-(struct app (e es) #:transparent)
-(struct ref (x) #:transparent)
-(struct lam (xs e) #:transparent)
-(struct smon (+ - S e) #:transparent) ;; Construct S, run e, attach S to e's result with +/- labels.
-(struct tmon (ηe T e) #:transparent) ;; ηe --> η, T --> Tv, attach Tv to η, run e.
-(struct ife (g t e) #:transparent)
-(struct letrece (cs e) #:transparent)
-(struct primop (which) #:transparent) ;; 'cons | 'new-timeline | 'pair? | 'car | 'cdr | 'null?
+(struct app ([e : Expr] [es : (Listof Expr)]) #:transparent)
+(struct ref ([x : Symbol]) #:transparent)
+(struct lam ([xs : (Listof Symbol)] [e : Expr]) #:transparent)
+;; Construct S, run e, attach S to e's result with +/- labels.
+(struct smon ([+ : Symbol] [- : Symbol] [S : SContract] [e : Expr]) #:transparent)
+ ;; ηe --> η, T --> Tv, attach Tv to η, run e.
+(struct tmon ([ηe : Expr] [T : Expr]) #:transparent)
+(struct ife ([g : Expr] [t : Expr] [e : Expr]) #:transparent)
+(struct letrece ([cs : (Listof (List Symbol Expr))] [e : Expr]) #:transparent)
+(struct begine ([es : (Pairof Expr (Listof Expr))]) #:transparent)
+(struct primop ([which : Symbol]) #:transparent) ;; 'cons | 'new-timeline | 'pair? | 'car | 'cdr | 'null?
+(define-type Expr (U app ref lam smon tmon ife letrece begine primop Datum
+                     bind kl · ∩ ∪ ¬ ε ⊤ ⊥))
+(define-type Datum (U Symbol String Number '() (Pair Datum Datum) #t #f Void))
+
+(: *letrece : (-> (Listof (List Symbol Expr)) Expr Expr))
+(define (*letrece cs e) (if (null? cs) e (letrece cs e)))
 
 #|
 Expr template:
@@ -28,199 +52,293 @@ Expr template:
     [(ref x) ???]
     [(lam xs e) ???]
     [(smon + - S e) ???]
-    [(tmon ηe T e) ???]
+    [(tmon ηe T) ???]
     [(ife g t e) ???]
     [(letrece cs e) ???]
+    [(begine es) ???]
     [(primop which) ???]
     [_ (error who "Bad expression ~a" e)])
 |#
-(define ∅eq (seteq))
+(: first* (All (A B) (-> (List A B) A)))
+(define (first* lst) (car lst))
+(: second* (All (A B) (-> (List A B) B)))
+(define (second* lst) (cadr lst))
 
 ;; Expression's support
+(: supp : (-> Expr (Setof Symbol)))
 (define (supp e)
   (match e
-    [(app e es) (map-union (supp e) es supp)]
+    [(app e es) ((inst map-union Expr Symbol) (supp e) es supp)]
     [(ref x) (seteq x)]
     [(lam xs e) (set-union (supp e) (apply seteq xs))]
     [(smon + - S e) (set-union (Ssupp S) (supp e))]
-    [(tmon ηe T e) (set-union (supp ηe) (Tsupp T) (supp e))]
+    [(tmon ηe T) (set-union (supp ηe) (supp T))]
     [(ife g t e) (set-union (supp g) (supp t) (supp e))]
-    [(letrece cs e) (set-union (supp e) (apply seteq (map first cs)))]
-    [(? primop?) ∅eq]
+    [(letrece cs e) (set-union (supp e)
+                               (apply seteq ((inst map Symbol (List Symbol Expr))
+                                             (inst first* Symbol Expr)
+                                             cs)))]
+    [(? primop?) (seteq)]
+
+    [(bind e) (supp e)]
+    [(or (? ε?) (? ⊥?) (? ⊤?)) (seteq)]
+    [(or (kl T) (¬ T)) (supp T)]
+    [(or (· T T*) (∪ T T*) (∩ T T*)) (set-union (supp T) (supp T*))]
     [_ (error 'supp "Bad expression ~a" e)]))
 
 ;; Free variables
+(: fv : (-> Expr (Setof Symbol)))
 (define (fv e)
   (match e
     [(app e es) (map-union (fv e) es fv)]
     [(ref x) (seteq x)]
     [(lam xs e) (set-subtract (fv e) (apply seteq xs))]
     [(smon + - S e) (set-union (Sfv S) (fv e))]
-    [(tmon ηe T e) (set-union (fv ηe) (Tfv T) (fv e))]
+    [(tmon ηe T) (set-union (fv ηe) (fv T))]
     [(ife g t e) (set-union (fv g) (fv t) (fv e))]
-    [(letrece cs e) (set-subtract (map-union (fv e) cs (compose fv second))
-                                  (apply seteq (map first cs)))]
-    [(primop which) ∅eq]
+    [(letrece cs e) (set-subtract (map-union (fv e) cs (compose fv (inst second* Symbol Expr)))
+                                  (apply seteq (map (inst first* Symbol Expr) cs)))]
+    [(begine es) (map-union ((inst seteq Symbol)) es fv)]
+    [(primop which) (seteq)]
+    [(? datum?) (seteq)]
+
+    [(bind e) (fv e)]
+    [(or (? ε?) (? ⊥?) (? ⊤?)) (seteq)]
+    [(or (kl T) (¬ T)) (fv T)]
+    [(or (· T T*) (∪ T T*) (∩ T T*)) (set-union (fv T) (fv T*))]
     [_ (error 'fv "Bad expression ~a" e)]))
 
 ;; another expression is quoted data
 
 ; Values
-(struct Clo (xs e ρ) #:transparent)
-(struct Clo/blessed (ℓ- ℓ+ Svs- Sv+ ℓ η clv) #:transparent)
-(struct WClo (xs e ρ) #:transparent)
-(struct timeline (nonce) #:transparent)
-(struct boxv (a) #:transparent)
-(struct weak (v) #:transparent)
+(struct Clo ([xs : (Listof Symbol)] [e : Expr] [ρ : Env]) #:transparent)
+(struct Clo/blessed ([ℓ- : Module] [ℓ+ : Module] [Svs- : (Listof SContractv)] [Sv+ : SContractv]
+                     [ℓ : Label] [η : timeline] [clv : Procedure-Value]) #:transparent)
+(struct timeline ([nonce : Any]) #:transparent)
+(struct boxv ([a : Any]) #:transparent)
+(struct weak ([v : Value]) #:transparent)
+(struct weakly ([v : Value]) #:transparent)
 ;; cons is another value
 (struct undefined () #:transparent) (define -undefined (undefined))
+(define-predicate datum? Datum)
+#;
 (define (datum? x)
   (or (boolean? x)
       (number? x)
       (string? x)
       (symbol? x)
       (null? x)
-      (pair? x)
+      (and (pair? x) (datum? (car x)) (datum? (cdr x)))
       (void? x)))
+(define-type Value (U Procedure-Value timeline boxv weak undefined
+                      #t #f Number String Symbol '() (Pairof Value Value) Void
+                      call ret ;; event objects
+                      TCon-Value))
+(define-type Procedure-Value (U Clo Clo/blessed weakly primop))
+(define-type TCon-Value (U Procedure-Value ⊤ ⊥ ε klv ·v ∪v ∩v ¬v))
+(define-predicate tcon-value? TCon-Value)
 
-(define (rng h) (for/seteq ([a (in-hash-values h)]) a))
+(: rng : (All (A B) (-> (HashTable A B) (Setof B))))
+(define (rng h) (for/fold ([b : (Setof B) (seteq)]) ([a (in-hash-values h)]) (set-add b a)))
 
-(define (SW* baseS baseW lst f)
-  (for/fold ([S baseS]
-             [W baseW])
-      ([x (in-list lst)])
-    (define-values (SS SW) (f x))
-    (values (set-union S SS) (set-union W SW))))
+(: weaken-addr : (-> Any (Setof Any) Any))
+(define (weaken-addr a live)
+  (if (set-member? live a) a -undefined))
 
-(define-syntax (∪2* stx)
-  (syntax-case stx ()
-    [(_ e ...)
-     (with-syntax ([(S ...) (generate-temporaries #'(e ...))]
-                   [(W ...) (generate-temporaries #'(e ...))])
-       #'(let-values ([(S W) e] ...)
-           (values (set-union S ...) (set-union W ...))))]))
+(: weaken-env : (All (A) (-> (HashTable A Any) (Setof Any) (HashTable A Any))))
+(define (weaken-env ρ live)
+  (for/fold ([ρ* : (HashTable A Any) (hash)])
+      ([(x a) (in-hash ρ)])
+    (hash-set ρ* x (weaken-addr a live))))
+
+(: weaken-proc : (-> Procedure-Value (Setof Any) Procedure-Value))
+(define (weaken-proc fn live)
+  (match fn
+    [(Clo xs e ρ) (Clo xs e (weaken-env ρ live))]
+    [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
+     (Clo/blessed ℓ- ℓ+
+                  (map (λ ([s : SContractv]) (weaken-scon s live)) Svs-)
+                  (weaken-scon Sv+ live)
+                  ℓ
+                  (weaken-timeline η live)
+                  (weaken-proc clv live))]
+    [v v]))
+
+(: weaken-timeline : (-> timeline (Setof Any) timeline))
+(define (weaken-timeline t live)
+  (match t [(timeline a) (timeline (weaken-addr a live))]))
+
+(: weaken : (-> Value (Setof Any) Value))
+(define (weaken v live)
+  (let rec ([v v])
+    (match v
+      [(boxv a) (boxv (weaken-addr a live))]
+      [(cons A D) (cons (rec A) (rec D))]
+      [(? timeline? v) (weaken-timeline v live)]
+      [(? Clo? v) (weaken-proc v live)]
+      [(? Clo/blessed? v) (weaken-proc v live)]
+      [(call ℓ fn args) (call ℓ (rec fn) (map rec args))]
+      [(ret ℓ fn v) (ret ℓ (rec fn) (rec v))]
+
+      [(kl Tv) (kl (rec Tv))]
+      [(¬ Tv) (¬ (rec Tv))]
+      [(bindv Tv) (bindv (rec Tv))]
+      [(∪ Tv0 Tv1) (∪ (rec Tv0) (rec Tv1))]
+      [(∩ Tv0 Tv1) (∩ (rec Tv0) (rec Tv1))]
+      [(· Tv0 Tv1) (· (rec Tv0) (rec Tv1))]
+
+      ;; includes (weak _) and (WClo _ _ _)
+      [v v])))
+
+(: weaken-scon : (-> SContractv (Setof Any) SContractv))
+(define (weaken-scon Sv live)
+  (let rec : SContractv ([Sv : SContractv Sv])
+       (cond [(-->/blessed? Sv)
+              (match-define (-->/blessed Svs- Sv+ ℓ η) Sv)
+              (-->/blessed (map rec Svs-) (rec Sv+) ℓ (cast (weaken η live) timeline))]
+             [(cons/blessed? Sv)
+              (match-define (cons/blessed Av Dv) Sv)
+              (cons/blessed (rec Av) (rec Dv))]
+             [(any/c? Sv) Sv]
+             [else (weaken-proc Sv live)])))
 
 ;; value -> (values Strongly-touched Weakly-touched)
-(define/match (touch v)
-  [((Clo _ _ ρ)) (values (rng ρ) ∅eq)]
-  [((WClo _ _ ρ)) (values ∅eq (rng ρ))]
-  [((timeline a)) (values (seteq a) ∅eq)]
-  [((boxv a)) (values (seteq a) ∅eq)]
-  [((weak v))
-   (define-values (S W) (touch v))
-   (values ∅eq (set-union S W))]
-  [((Clo/blessed _ _ Svs- Sv+ _ η clv))
-   (define-values (S* W*)
-     (∪2* (touch η) (touch clv) (scon-touch Sv+)))
-   (SW* S* W* Svs- scon-touch)]
-  [((cons A D)) (∪2* (touch A) (touch D))]
+(: touch : (-> Value (Setof Any)))
+(define (touch v)
+  (match v
+   [(Clo _ _ ρ) (rng ρ)]
+   [(timeline a) (seteq a)]
+   [(boxv a) (seteq a)]
+   [(Clo/blessed _ _ Svs- Sv+ _ η clv)
+    (map-union
+     (set-union (touch η) (touch clv) (scon-touch Sv+))
+     Svs-
+     scon-touch)]
+   [(cons A D) (set-union (touch A) (touch D))]
 
-  [((call _ fn args))
-   (define-values (S* W*) (touch fn))
-   (SW* S* W* args touch)]
-  [((ret _ fn  v)) (∪2* (touch fn) (touch v))]
+   [(call _ fn args)
+    (map-union (touch fn) args touch)]
+   [(ret _ fn  v) (set-union (touch fn) (touch v))]
 
-  [((or (kl Tv) (¬ Tv) (bindv Tv) (ev-predv Tv))) (touch Tv)]
-  [((or (∪ Tv0 Tv1) (∩ Tv0 Tv1) (· Tv0 Tv1)))
-   (∪2* (touch Tv0) (touch Tv1))]
-  
-  [(_) ∅eq])
+   [(or (kl Tv) (¬ Tv) (bindv Tv)) (touch Tv)]
+   [(or (∪ Tv0 Tv1) (∩ Tv0 Tv1) (· Tv0 Tv1))
+    (set-union (touch Tv0) (touch Tv1))]
+   ;; includes (weak _) and (WClo _ _ _)
+   [_ (seteq)]))
 
+(: scon-touch : (-> SContractv (Setof Any)))
 (define/match (scon-touch Sv)
   [((-->/blessed Svs- Sv+ _ η))
-   (define-values (S* W*) (∪2* (scon-touch Sv+) (touch η)))
-   (SW* S* W* Svs- scon-touch)]
+   (map-union (set-union (scon-touch Sv+) (touch η))
+              Svs-
+              scon-touch)]
   [((cons/blessed Av Dv))
-   (∪2* (scon-touch Av) (scon-touch Dv))]
-  [(v) (touch v)])
+   (set-union (scon-touch Av) (scon-touch Dv))]
+  [((? any/c?)) (seteq)]
+  [(v) (touch (cast v Value))])
 
+(: frame-touch : (-> Frame (Setof Any)))
 (define/match (frame-touch φ)
-  [((evk _ vs ρ)) (SW* (rng ρ) ∅eq vs touch)]
+  [((evk _ vs ρ)) (map-union (rng ρ) vs touch)]
   [((or (sk _ _ _ ρ)
         (ifk _ _ ρ)
         (lrk _ _ _ ρ)
         (mkd _ ρ)
-        (mkt _ _ ρ)
+        (mkt _ ρ)
         (kbin₀ _ _ ρ)
         (begink _ ρ)))
-   (values (rng ρ) ∅eq)]
+   (rng (cast ρ Env))]
 
   [((ch*k _ Svs- _ Sv+ vs _ η clv args))
-   (define-values (S* W*) (∪2* (touch η) (touch clv) (scon-touch Sv+)))
-   (define-values (S** W**) (SW* S* W* Svs- scon-touch))
-   (SW* S** W** args touch)]
+   (map-union
+    (map-union (set-union (touch η) (touch clv) (scon-touch Sv+)) Svs- scon-touch)
+    args
+    touch)]
   [((chk _ _ Sv+ clv _ η))
-   (∪2* (touch clv) (touch η) (scon-touch Sv+))]
-  [((chDk _ _ Dv v)) (∪2* (scon-touch Dv) (touch v))]
-  [((or (wrapk _ _ Sv) (mkcons Sv))) (scon-touch Sv)]
+   (set-union (touch clv) (touch η) (scon-touch Sv+))]
+  [((chDk _ _ Dv v)) (set-union (scon-touch Dv) (touch v))]
+  [((or (wrapk _ _ Sv) (mkcons Sv))) (scon-touch (cast Sv SContractv))]
 
   [((or (sret _ v0 _ v1)
         (blret _ v0 v1)))
-   (∪2* (touch v0) (touch v1))]
-  [((blcall _ _ Sv+ clv vs* _ η))
-   (define-values (S* W*) (∪2* (touch η) (touch clv) (scon-touch Sv+)))
-   (SW* S* W* vs* touch)]
+   (set-union (touch v0) (touch v1))]
+  [((blcall _ _ Sv+ clv vs* _ _ η))
+   (map-union
+      (set-union (touch η) (touch clv) (scon-touch Sv+))
+      vs*
+      touch)]
 
-  [((or (tbin₀ _ Tv) (seqk Tv) (kbin₁ _ Tv))) (touch Tv)]
+  [((or (tbin₀ _ Tv) (seqk Tv) (kbin₁ _ Tv) (consk Tv))) (touch Tv)]
   [((seq2k T ev η _))
-   (∪2* (touch T) (touch ev) (touch η))]
+   (set-union (touch T) (touch ev) (touch η))]
 
   [((or (negk _ _ _ _ ρ Svs-)
         (timelinek Svs- _ _ ρ)))
-   (SW* (rng ρ) ∅eq Svs- scon-touch)]
-  [((arrk vs v _))
-   (define-values (S* W*) (touch v))
-   (SW* S* W* vs touch)]
-  [(_) ∅eq])
+   ((inst map-union SContractv Any) (rng (cast ρ Env)) (cast Svs- (Listof SContractv)) scon-touch)]
+  [((arrk Svs Sv _))
+   ((inst map-union SContractv Any) (scon-touch Sv) Svs scon-touch)]
+  [(_) (seteq)])
 
+(: kont-touch : (-> Kont (Setof Any)))
 (define/match (kont-touch κ)
-  [((cons φ κ)) (∪2* (frame-touch φ) (kont-touch κ))]
-  [('()) (values ∅eq ∅eq)])
+  [((scons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
+  [((econs φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
+  [((acons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
+  [((bcons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
+  [((lcons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
+  [('()) (seteq)])
 
 ;; ℘[Addr] Map[Addr,Value] -> (values Strongly-reachable Only-weakly-reachable)
-(define (reachable Sroot Wroot σ)
-  (define seenS (mutable-seteq))
-  (define onlyW (mutable-seteq))
-  (set-union! onlyW (set-subtract Wroot Sroot))
-  (let rec ([todo Sroot])
-    (cond [(set-empty? todo) (values seenS onlyW)]
+(: reachable : (-> (Setof Any) Store (Setof Any)))
+(define (reachable root σ)
+  (: seen : (HashTable Any #t))
+  (define seen (make-hasheq '()))
+  (let rec : (Setof Any) ([todo : (Setof Any) root])
+    (cond [(set-empty? todo)
+           (for/fold ([S : (Setof Any) (set)]) ([a (in-hash-keys seen)]) (set-add S a))]
           [else
            (define a (set-first todo))
            (define todo* (set-rest todo))
            (cond
-            [(set-member? seenS a) (rec todo*)]
+            [(hash-has-key? seen a) (rec todo*)]
             [else
-             (set-remove! onlyW a)
-             (set-add! seenS a)
-             (define-values (S W) (touch a))
-             (set-union! onlyW (set-subtract W seenS))
-             (rec (set-union todo* S))])])))
+             (hash-set! seen a #t)
+             (rec (set-union todo* (touch (hash-ref σ a))))])])))
 
+(: state-touch : (-> State (values (Setof Any) Store)))
 (define (state-touch ς)
   (match ς
-    [(ev _ ρ _ κ)
-     (define-values (S W) (kont-touch κ))
-     (values (set-union (rng ρ) S) W)]
-    [(co κ v _)
-     (∪2* (kont-touch κ) (touch v))]
-    [(ap fn args _ κ)
-     (define-values (S* W*) (∪2* (touch fn) (kont-touch κ)))
-     (SW* S* W* args touch)]
-    [(check ℓ+ ℓ- S v _ κ)
-     (∪2* (scon-touch S) (touch v) (kont-touch κ))]
-    [(ev-syn S ρ _ κ)
-     (∪2* (scon-touch S) (kont-touch κ) (values (rng ρ) ∅eq))]
-    [(send T ev η _ κ)
-     (∪2* (touch T) (touch ev) (touch η) (kont-touch κ))]
-    [(check-app _ Svs- _ Sv+ vs* _ η clv vs _ κ)
-     (define-values (S* W*)
-       (∪2* (touch η) (touch clv) (kont-touch κ) (scon-touch Sv+)))
-     (define-values (S** W**)
-       (SW* S* W* Svs- scon-touch))
-     (define-values (S*** W***)
-       (SW* S** W** vs* touch))
-     (SW* S*** W*** vs touch)]))
+    [(ev _ ρ σ κ)
+     (values (set-union (rng ρ) (kont-touch κ)) σ)]
+    [(co κ v σ)
+     (values (set-union (kont-touch κ) (touch v)) σ)]
+    [(ap fn args σ κ)
+     (values
+      (map-union
+       (set-union (touch fn) (kont-touch κ))
+       args
+       touch)
+      σ)]
+    [(check ℓ+ ℓ- S v σ κ)
+     (values (set-union (scon-touch S) (touch v) (kont-touch κ)) σ)]
+    [(ev-syn _ ρ σ κ)
+     (values (set-union (kont-touch κ) (rng ρ)) σ)]
+    [(send T ev _ η σ κ)
+     (values (set-union (touch T) (touch ev) (touch η) (kont-touch κ)) σ)]
+    [(check-app _ Svs- _ Sv+ vs* _ η clv vs σ κ)
+     (values
+      (map-union
+       (map-union
+        (map-union (set-union (touch η) (touch clv) (kont-touch κ) (scon-touch Sv+))
+                   Svs-
+                   scon-touch)
+        vs*
+        touch)
+       vs
+       touch)
+      σ)]))
 
+(: state-replace-σ : (-> State Store State))
 (define (state-replace-σ ς σ)
   (match ς
     [(ev e ρ _ κ) (ev e ρ σ κ)]
@@ -228,27 +346,30 @@ Expr template:
     [(ap fn args _ κ) (ap fn args σ κ)]
     [(check ℓ+ ℓ- S v _ κ) (check ℓ+ ℓ- S v σ κ)]
     [(ev-syn S ρ _ κ) (ev-syn S ρ σ κ)]
-    [(send T ev η _ κ) (send T ev η σ κ)]
+    [(send T ev ℓ η _ κ) (send T ev ℓ η σ κ)]
     [(check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs _ κ)
      (check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs σ κ)]))
 
+(: Γ : (-> State State))
 (define (Γ ς)
   (define-values (root σ) (state-touch ς))
   (define R (reachable root σ))
   (define σ*
-    (for/hash ([(a v) (in-hash σ)]
-               #:when (set-member? a rS))
-      (values a (weaken v rW))))
+    (for/fold ([σ* : Store (hash)])
+        ([(a v) (in-hash σ)]
+         #:when (set-member? R a))
+      (hash-set σ* a (weaken v R))))
   (state-replace-σ ς σ*))
 
+(: value-equal? : (-> Value Value Store Boolean))
 (define (value-equal? v0 v1 σ)
-  (define A (mutable-seteq))
+  (define A (make-hasheq '()))
   (let rec ([v0 v0] [v1 v1])
     (match* (v0 v1)
       [((boxv v0*) (boxv v1*))
        (define p (cons v0 v1))
-       (or (set-member? A p)
-           (begin (set-add! A p)
+       (or (hash-has-key? A p)
+           (begin (hash-set! A p #t)
                   (rec (hash-ref σ v0*) (hash-ref σ v1*))))]
       [((cons v0A v0D) (cons v1A v1D))
        (and (rec v0A v1A)
@@ -256,12 +377,17 @@ Expr template:
       [(_ _) (equal? v0 v1)])))
 
 ;; Structural contract syntax
-(struct --> (Ss- S+ ℓ e) #:transparent)
-(struct cons/c (A D) #:transparent)
-;; Evaluated structural contracts
-(struct -->/blessed (Svs- Sv+ ℓ η) #:transparent)
-(struct cons/blessed (Av Dv) #:transparent)
+(struct --> ([Ss- : (Listof SContract)] [S+ : SContract] [ℓ : Label] [e : Expr]) #:transparent)
+(struct cons/c ([A : SContract] [D : SContract]) #:transparent)
+(struct any/c () #:transparent) (define -any/c (any/c))
+(define-type SContract (U --> cons/c any/c Expr))
 
+;; Evaluated structural contracts
+(struct -->/blessed ([Svs- : (Listof SContractv)] [Sv+ : SContractv] [ℓ : Label] [η : timeline]) #:transparent)
+(struct cons/blessed ([Av : SContractv] [Dv : SContractv]) #:transparent)
+(define-type SContractv (U -->/blessed cons/blessed any/c Procedure-Value))
+
+(: Ssupp : (-> SContract (Setof Symbol)))
 (define (Ssupp S)
   (match S
     [(--> Ss- S+ _ e)
@@ -269,218 +395,445 @@ Expr template:
          ([S- (in-list Ss-)])
        (set-union S* (Ssupp S-)))]
     [(cons/c A D) (set-union (Ssupp A) (Ssupp D))]
+    [(? any/c?) (seteq)]
     [_ (error 'Ssupp "Bad structural contract ~a" S)]))
 
+(: Sfv : (-> SContract (Setof Symbol)))
 (define (Sfv S)
   (match S
     [(--> Ss- S+ _ e)
-     (for/fold ([S* (set-union (Sfv S+) (fv e))])
-         ([S- (in-list Ss-)])
+     (for/fold ([S* : (Setof Symbol) (set-union (Sfv S+) (fv e))])
+         ([S- : SContract (in-list Ss-)])
        (set-union S* (Sfv S-)))]
     [(cons/c A D) (set-union (Sfv A) (Sfv D))]
-    [_ (error 'Sfv "Bad structural contract ~a" S)]))
+    [(? any/c?) ((inst seteq Symbol))]
+    [e (fv (cast e Expr))]))
 
 ;; Temporal contract syntax
-(struct ev-pred (e) #:transparent)
-(struct ev-any () #:transparent)
-;;(struct ev-none () #:transparent)
-(struct bind (e) #:transparent) ;; Take an event and produce a tcon
-(struct kl (T) #:transparent)
-(struct · (T₀ T₁) #:transparent)
-(struct ∪ (T₀ T₁) #:transparent)
-(struct ∩ (T₀ T₁) #:transparent)
-(struct ¬ (T) #:transparent)
+(struct bind ([e : Expr]) #:transparent) ;; Take an event and produce a tcon
+(struct kl ([T : Expr]) #:transparent)
+(struct · ([T₀ : Expr] [T₁ : Expr]) #:transparent)
+(struct ∪ ([T₀ : Expr] [T₁ : Expr]) #:transparent)
+(struct ∩ ([T₀ : Expr] [T₁ : Expr]) #:transparent)
+(struct ¬ ([T : Expr]) #:transparent)
+
+(struct klv ([T : TCon-Value]) #:transparent)
+(struct ·v ([T₀ : TCon-Value] [T₁ : TCon-Value]) #:transparent)
+(struct ∪v ([T₀ : TCon-Value] [T₁ : TCon-Value]) #:transparent)
+(struct ∩v ([T₀ : TCon-Value] [T₁ : TCon-Value]) #:transparent)
+(struct ¬v ([T : TCon-Value]) #:transparent)
+
 (struct ε () #:transparent)
 (struct ⊥ () #:transparent)
 (struct ⊤ () #:transparent)
-;; A value is any of the above except ev-pred and bind, which evaluate to ev-predv and bindv resp.
-(struct ev-predv (v) #:transparent)
-(struct bindv (v) #:transparent)
-
-;; Temporal contract's support
-(define (Tsupp T)
-  (match T
-    [(or (ev-pred e) (bind e)) (supp e)]
-    [(or (? ε?) (? ⊥?) (? ⊤?) (? ev-any?)) ∅eq]
-    [(or (kl T) (¬ T)) (Tsupp T)]
-    [(or (· T T*) (∪ T T*) (∩ T T*)) (set-union (Tsupp T) (Tsupp T*))]
-    [_ (error 'Tsupp "Bad temporal contract ~a" T)]))
-
-;; Temporal contract's free variables
-(define (Tfv T)
-  (match T
-    [(or (ev-pred e) (bind e)) (fv e)]
-    [(or (? ε?) (? ⊥?) (? ⊤?) (? ev-any?)) ∅eq]
-    [(or (kl T) (¬ T)) (Tfv T)]
-    [(or (· T T*) (∪ T T*) (∩ T T*)) (set-union (Tfv T) (Tfv T*))]
-    [_ (error 'Tfv "Bad temporal contract ~a" T)]))
+;; A value is any of the above except bind, which evaluates bindv.
+(struct bindv ([v : Procedure-Value]) #:transparent)
 
 (define -⊤ (⊤))
 (define -⊥ (⊥))
 (define -ε (ε))
-(define -ev-any (ev-any))
+(define -ev-any (let ([x (gensym 'x)]) (lam (list x) #t)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; WOOHOO CODE DUPLICATION!!!
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; Nullable? decision procedure.
+(: ν? : (-> Expr Boolean))
 (define/match (ν? T)
-  [((or (? ev-pred?) (? ev-predv?) (? ev-any?) #;(? ev-none?) (? bind?) (? bindv?)
-        )) #f]
   [((∪ T₀ T₁)) (or (ν? T₀) (ν? T₁))]
   [((or (∩ T₀ T₁) (· T₀ T₁))) (and (ν? T₀) (ν? T₁))]
   [((or (? ε?) (? kl?) (? ¬?) (? ⊤?))) #t]
-  [((? ⊥?)) #f])
+  [(_) #f] ;; ⊥, bind, expression
+  )
 
 ;; (ν!? T) ⇒ ⟦T⟧ = {ε}
 ;; Incomplete since μ? is incomplete.
+(: ν!? : (-> Expr Boolean))
 (define/match (ν!? T)
   [((? ε?)) #t]
   [((kl T)) (ν!? T)] ;; ε* = ε.
   [((¬ T)) (μ? T)] ;; ¬ adds {ε}, but can't get anything else out of T.
   [((or (∪ T₀ T₁) (· T₀ T₁))) (and (ν!? T₀) (ν!? T₁))]
   [((∩ T₀ T₁)) (or (ν!? T₀) (ν!? T₁))]
-  [((or (? ⊥?) (? ⊤?) (? ev-pred?) (? ev-predv?) (? ev-any?) #;(? ev-none?)
-        (? bind?) (? bindv?))) #f])
+  [(_) #f]) ;; ⊥ ⊤ bind pred
 
 ;; (μ? T) ⇒ ⟦T⟧ = ∅
 ;; Incomplete decision due to undecidability of infeasibility of matching.
+(: μ?  : (-> Expr Boolean))
 (define/match (μ? T)
   [((∪ T₀ T₁)) (and (μ? T₀) (μ? T₁))]
   [((∩ T₀ T₁)) (or (μ? T₀) (μ? T₁))]
   ;; denotation of · contains partial traces of T₀ regardless of T₁.
   ;; If T₀ is denotationally {ε}, then we can say the sequence is ⊥ if T₁ is.
   [((· T₀ T₁)) (or (μ? T₀) (and (ν!? T₀) (μ? T₁)))]
-  [((or (? ε?) (? kl?) (? ¬?) (? ⊤?)
-        (? ev-pred?) (? ev-predv?) (? ev-any?) #;(? ev-none?) (? bind?) (? bindv?)))
-   #f]
-  [((? ⊥?)) #t])
+  [((? ⊥?)) #t]
+  [(_) #f]) ;; (or (? ε?) (? kl?) (? ¬?) (? ⊤?) (? bind?) (? bindv?) expr)
 
 ;; Theorem: DNE does not hold. However, ¬^4 = ¬^2.
 ;; We are /adding/ one ¬, so if at 3, going to 4 is going to 2.
+(: mk¬ : (-> Expr Expr))
 (define/match (mk¬ T)
   [((¬ (¬ (¬ T)))) (¬ (¬ T))]
   [(T) (¬ T)])
 
+(: mk· : (-> Expr Expr Expr))
 (define (mk· T₀ T₁)
-  (cond [(or (⊥? T₀) (⊤? T₀))
-         T₀]
+  (cond [(μ? T₀) -⊥]
         [(ν!? T₀) T₁]
-        [(μ? T₀) -⊥]
         [else (· T₀ T₁)]))
 
+(: mk∪ : (-> Expr Expr Expr))
 (define (mk∪ T₀ T₁)
   (cond [(equal? T₀ T₁) T₀]
         [(μ? T₀) T₁]
         [(μ? T₁) T₀]
         [else (∪ T₀ T₁)]))
 
+(: mk∩ : (-> Expr Expr Expr))
 (define (mk∩ T₀ T₁)
   (cond [(equal? T₀ T₁) T₀]
         [(⊤? T₀) T₁]
         [(⊤? T₁) T₀]
         [else (∩ T₀ T₁)]))
 
+(: mkkl : (-> Expr Expr))
 (define (mkkl T)
   (cond [(ν!? T) -ε]
         [(or (kl? T) (⊤? T)) T]
         [else (kl T)]))
 
+;;;;;;;;;;;;;;
+;; Value forms
+
+(: ν?v : (-> Value Boolean))
+(define/match (ν?v T)
+  [((∪v T₀ T₁)) (or (ν?v T₀) (ν?v T₁))]
+  [((or (∩v T₀ T₁) (·v T₀ T₁))) (and (ν?v T₀) (ν?v T₁))]
+  [((or (? ε?) (? klv?) (? ¬v?) (? ⊤?))) #t]
+  [(_) #f] ;; ⊥, bind, expression
+  )
+
+;; (ν!? T) ⇒ ⟦T⟧ = {ε}
+;; Incomplete since μ? is incomplete.
+(: ν!?v : (-> Value Boolean))
+(define/match (ν!?v T)
+  [((? ε?)) #t]
+  [((klv T)) (ν!?v T)] ;; ε* = ε.
+  [((¬v T)) (μ?v T)] ;; ¬ adds {ε}, but can't get anything else out of T.
+  [((or (∪v T₀ T₁) (·v T₀ T₁))) (and (ν!?v T₀) (ν!?v T₁))]
+  [((∩v T₀ T₁)) (or (ν!?v T₀) (ν!?v T₁))]
+  [(_) #f]) ;; ⊥ ⊤ bind pred
+
+;; (μ? T) ⇒ ⟦T⟧ = ∅
+;; Incomplete decision due to undecidability of infeasibility of matching.
+(: μ?v  : (-> Value Boolean))
+(define/match (μ?v T)
+  [((∪v T₀ T₁)) (and (μ?v T₀) (μ?v T₁))]
+  [((∩v T₀ T₁)) (or (μ?v T₀) (μ?v T₁))]
+  ;; denotation of · contains partial traces of T₀ regardless of T₁.
+  ;; If T₀ is denotationally {ε}, then we can say the sequence is ⊥ if T₁ is.
+  [((·v T₀ T₁)) (or (μ?v T₀) (and (ν!?v T₀) (μ?v T₁)))]
+  [((? ⊥?)) #t]
+  [(_) #f]) ;; (or (? ε?) (? kl?) (? ¬?) (? ⊤?) (? bind?) (? bindv?) expr)
+
+;; Theorem: DNE does not hold. However, ¬^4 = ¬^2.
+;; We are /adding/ one ¬, so if at 3, going to 4 is going to 2.
+(: mk¬v : (-> TCon-Value TCon-Value))
+(define/match (mk¬v T)
+  [((¬v (¬v (¬v T)))) (¬v (¬v T))]
+  [(T) (¬v T)])
+
+(: mk·v : (-> TCon-Value TCon-Value TCon-Value))
+(define (mk·v T₀ T₁)
+  (cond [(μ?v T₀) -⊥]
+        [(ν!?v T₀) T₁]
+        [else (·v T₀ T₁)]))
+
+(: mk∪v : (-> TCon-Value TCon-Value TCon-Value))
+(define (mk∪v T₀ T₁)
+  (cond [(equal? T₀ T₁) T₀]
+        [(μ?v T₀) T₁]
+        [(μ?v T₁) T₀]
+        [else (∪v T₀ T₁)]))
+
+(: mk∩v : (-> TCon-Value TCon-Value TCon-Value))
+(define (mk∩v T₀ T₁)
+  (cond [(equal? T₀ T₁) T₀]
+        [(⊤? T₀) T₁]
+        [(⊤? T₁) T₀]
+        [else (∩v T₀ T₁)]))
+
+(: mkklv : (-> TCon-Value TCon-Value))
+(define (mkklv T)
+  (cond [(ν!?v T) -ε]
+        [(or (klv? T) (⊤? T)) T]
+        [else (klv T)]))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Frames
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(define-type Env (HashTable Symbol Any))
+
 ;; Evaluation Frames
-(struct evk (es vs ρ) #:transparent)
-(struct sk (+ - e ρ) #:transparent) ;; attaching structural monitor
-(struct ifk (t e ρ) #:transparent)
-(struct lrk (x cs body ρ) #:transparent)
+(struct evk ([es : (Listof Expr)] [vs : (Listof Value)] [ρ : Env]) #:transparent)
+(struct ifk ([t : Expr] [e : Expr] [ρ : Env]) #:transparent)
+(struct lrk ([x : Symbol] [cs : (Listof (List Symbol Expr))] [body : Expr] [ρ : Env]) #:transparent)
+
+;; Delimiting frames
+(struct sk ([+ : Symbol] [- : Symbol] [e : Expr] [ρ : Env]) #:transparent) ;; attaching structural monitor
+(struct mkflat () #:transparent) (define -mkflat (mkflat)) ;; to make the typechecker happy
 
 ;; Checking frames
-(struct ch*k (ℓ- Svs- ℓ+ Sv+ vs ℓ η clv args) #:transparent)
-(struct chk (ℓ+ ℓ- Sv+ clv ℓ η) #:transparent)
-(struct chDk (ℓ+ ℓ- D v) #:transparent)
-(struct wrapk (ℓ+ ℓ- Sv) #:transparent)
+(struct ch*k ([ℓ- : Module] [Svs- : (Listof SContractv)] [ℓ+ : Module] [Sv+ : SContractv]
+              [vs : (Listof Value)]
+              [ℓ : Label]
+              [η : timeline]
+              [clv : Procedure-Value]
+              [args : (Listof Value)]) #:transparent)
+(struct chk ([ℓ+ : Module] [ℓ- : Module] [Sv+ : SContractv] [clv : Procedure-Value]
+             [ℓ : Label] [η : timeline]) #:transparent)
+(struct chDk ([ℓ+ : Module] [ℓ- : Module] [D : SContractv] [v : Value]) #:transparent)
+(struct consk ([Av : Value]) #:transparent)
+
+(struct checking () #:transparent) (define -checking (checking))
+
+(struct flatk ([v-checked : Value] [flat-fn : Procedure-Value] [ℓ-blame : Module]) #:transparent)
+(struct wrapk ([ℓ+ : Module] [ℓ- : Module] [Sv : SContractv]) #:transparent)
+
 
 ;; Messaging frames
-(struct sret (ℓ+ clv ℓ η) #:transparent)
-(struct blret (ℓ+ η rv) #:transparent)
-(struct blcall (ℓ- ℓ+ Sv+ clv vs* ℓ η) #:transparent)
+(struct sret ([ℓ+ : Module] [clv : Procedure-Value] [ℓ : Label] [η : timeline]) #:transparent)
+(struct blret ([ℓ+ : Module] [η : timeline] [ev : ret]) #:transparent)
+(struct blcall ([ℓ- : Module] [ℓ+ : Module] [Sv+ : SContractv]
+                [clv : Procedure-Value] [vs* : (Listof Value)] [ℓ : Label]
+                [ev : call] [η : timeline]) #:transparent)
 
 ;; Deriving frames
-(struct tbin₀ (C T) #:transparent)
-(struct seq2k (T ev η ℓ) #:transparent) ;; evaling (· T₀ T₁) and (ν? T₀)
+(struct tbin₀ ([C : (-> TCon-Value TCon-Value TCon-Value)] [T : TCon-Value]) #:transparent)
+(struct seq2k ([T : TCon-Value]
+               [ev : (U call ret)]
+               [η : timeline]
+               [ℓ- : Module]) #:transparent) ;; evaling (· T₀ T₁) and (ν? T₀)
 ;; If (· T₀ T₁) and ¬(ν? T₀), then (· ∂_E(T₀) T₁)
 ;; If (kl T) then (· ∂_E(T) (kl T))
-(struct seqk (T) #:transparent)
-
+(struct seqk ([T : TCon-Value]) #:transparent)
+(struct tunitary ([C : (-> TCon-Value TCon-Value)]) #:transparent)
+(define negt (tunitary (λ (T) (if (ν?v T) -⊥ (mk¬v T)))))
 
 ;; Making structural contract frames
-(struct negk (Ss- S+ ℓ e ρ Svs-) #:transparent) ;; left of ->
-(struct mkd (D ρ) #:transparent)
-(struct mkcons (A) #:transparent)
-(struct timelinek (rev-Ss- ℓ e ρ) #:transparent)
-(struct arrk (vs v ℓ) #:transparent)
+(struct negk ([Ss- : (Listof SContract)] [S+ : SContract] [ℓ : Label] [e : Expr] [ρ : Env] [Svs- : (Listof SContractv)]) #:transparent) ;; left of ->
+(struct mkd ([D : SContract] [ρ : Env]) #:transparent)
+(struct mkcons ([A : SContractv]) #:transparent)
+(struct timelinek ([rev-Ss- : (Listof SContractv)] [ℓ : Label] [e : Expr] [ρ : Env]) #:transparent)
+;; Final frame, so in co, not cos
+(struct arrk ([vs : (Listof SContractv)] [v : SContractv] [ℓ : Label]) #:transparent)
+
+;; SCon-Frames are delimited by an sk in the Kont.
+(define-type SCon-Frame (U negk mkd mkcons timelinek))
 
 ;; Making temporal contract frames
-(struct mkt (T e ρ) #:transparent)
-(struct kunitary (C) #:transparent)
-(struct kbin₀ (C T ρ) #:transparent)
-(struct kbin₁ (C Tv) #:transparent)
-(struct pred-to-T () #:transparent) (define -pred-to-T (pred-to-T))
-(struct begink (e ρ) #:transparent)
-(define kevpred (kunitary ev-predv))
-(define kbind (kunitary bindv))
-(define kkl (kunitary kl))
-(define kneg (kunitary ¬))
-(define negt (kunitary (λ (T) (if (ν? T) -⊥ (¬ T)))))
+(struct mkt ([T : Expr] [ρ : Env]) #:transparent)
+(struct kunitary ([C : (-> TCon-Value TCon-Value)]) #:transparent)
+(struct kbin₀ ([C : (-> TCon-Value TCon-Value TCon-Value)] [T : Expr] [ρ : Env]) #:transparent)
+(struct kbin₁ ([C : (-> TCon-Value TCon-Value TCon-Value)] [Tv : TCon-Value]) #:transparent)
+(struct clo-to-bind () #:transparent) (define -clo-to-bind (clo-to-bind))
+(struct begink ([es : (Listof Expr)] [ρ : Env]) #:transparent)
+(define kkl (kunitary mkklv))
+(define kneg (kunitary mk¬v))
 
+;; Computed temporal contracts
+(struct pred-to-T () #:transparent) (define -pred-to-T (pred-to-T))
+(struct mk-tcon () #:transparent) (define -mk-tcon (mk-tcon))
+
+(define-type Deriv-Frame (U tunitary tbin₀ seq2k seqk))
+(define-type Check-Frame (U chDk consk))
+(define-type Ev-Frame (U evk ifk lrk begink wrapk chk
+                         clo-to-bind kunitary mkt kbin₀ kbin₁ ;; making tcons
+                         ))
+
+(define-type Frame (U sk arrk mkflat blcall blret flatk
+                      SCon-Frame Ev-Frame Deriv-Frame Check-Frame))
 ;; Events
-(struct call (ℓ fn args) #:transparent)
-(struct ret (ℓ fn v) #:transparent)
+(struct call ([ℓ : Label] [fn : Value] [args : (Listof Value)]) #:transparent)
+(struct ret ([ℓ : Label] [fn : Value] [v : Value]) #:transparent)
+
+(define-type Store (HashTable Any Value))
+
+;; Continuations aren't lists - they bounce back and forth.
+(struct scons ([φ : SCon-Frame]
+               [κ : SKont]) #:transparent)
+(struct econs ([φ : Ev-Frame]
+               [κ : EKont]) #:transparent)
+(struct tcons ([φ : Deriv-Frame]
+               [κ : TKont]) #:transparent)
+(struct ccons ([φ : Check-Frame]
+               [κ : CKont]) #:transparent)
+;; Delimiter continuations
+(struct acons ([φ : (U arrk mkflat)] [κ : SKont]) #:transparent) ;; ev-syn -> ev
+(struct bcons ([φ : sk] [κ : EKont]) #:transparent) ;; ev -> ev-syn
+(struct pcons ([φ : (U mk-tcon pred-to-T)] [κ : TKont]) #:transparent) ;; send -> ev
+(struct lcons ([φ : (U blret blcall)] [κ : EKont]) #:transparent) ;; check -> send
+(struct vcons ([φ : flatk] [κ : CKont]) #:transparent) ;; check -> ev
+(struct hcons ([φ : (U sret ch*k checking)] [κ : EKont]) #:transparent) ;; check -> ev
+
+(define-type SKont (U bcons ;; EKont delimiter
+                      scons)) ;; in the middle of construction
+(define-type EKont (U Null ;; Done
+                      econs ;; in the middle of evalution
+                      pcons ;; TKont delimiter
+                      acons ;; SKont delimiter
+                      vcons)) ;; CKont delimiter
+(define-type TKont (U lcons ;; EKont delimiter
+                      tcons))
+(define-type CKont (U hcons ;; delimiter
+                      ccons))
+;; sk is the special delimiter
+(define-type Kont (U SKont EKont TKont CKont))
+
+(: step-coc : (-> coc State))
+(define (step-coc ς)
+  (match-define (coc κ* v σ) ς)
+  (match κ*
+    [(ccons φ κ)
+     (match φ
+      ;; send the return message with the wrapped return value
+      [(chDk ℓ+ ℓ- SDv D) (check ℓ+ ℓ- SDv D σ (ccons (consk v) κ))]
+      )]
+    [(hcons φ κ)
+     (match φ
+       [(ch*k ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv vs-checked)
+        (check-app ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv (cons v vs-checked) σ κ)]
+       [(sret ℓ+ clv ℓ η)
+       (define ev (ret ℓ clv v))
+       (define Tv (hash-ref σ η (λ () -⊤)))
+       (if (tcon-value? Tv)
+           (send Tv ev ℓ+ η σ (lcons (blret ℓ+ η ev) κ))
+           (error 'step-co "Somehow a timeline mapped to a non-tcon ~a" ς))]
+       [(? checking?) (co κ v σ)])]))
+
+(: step-cod : (-> cod State))
+(define (step-cod ς)
+  (match-define (cod κ* v σ) ς)
+  (: ensure-tcon : (-> (-> TCon-Value State) State))
+  (define (ensure-tcon f)
+    (if (tcon-value? v)
+        (f v)
+        (stuck ς "Expected a temporal contract value")))
+  (match κ*
+    [(lcons φ κ)
+     (match φ
+      [(blcall ℓ- ℓ+ Sv+ clv vs* ℓ ev η)
+       ;; Temporal contract has been derived against call message.
+       ;; If it's blatantly bad, then blame.
+       (if (μ?v v)
+           (tblame ℓ- (hash-ref σ η (λ () -⊤)) ev)
+           ;; call the function with the cleaned values, to check the positive contract afterwards.
+           (ap clv vs* (hash-set σ η v) (econs (chk ℓ+ ℓ- Sv+ clv ℓ η) κ)))]
+      [(blret ℓ+ η (and (ret _ _ rv) ev))
+       ;; Temporal contract has been derived against return message.
+       ;; If it's blatantly bad, then blame.
+       (if (μ?v v)
+           (tblame ℓ+ (hash-ref σ η (λ () -⊤)) ev)
+           (co κ rv (hash-set σ η v)))])]
+    [(tcons φ κ)
+     (match φ ;; Derivatives of temporal contracts
+       [(tunitary C) (ensure-tcon (λ (v) (cod κ (C v) σ)))]
+       [(seqk T₁) (ensure-tcon (λ (v) (cod κ (mk·v v T₁) σ)))]
+       [(seq2k T₁ ev η ℓ-)
+        ;; v is ∂_ev(T₀)
+        (error 'todo)
+        (send T₁ ev ℓ- η σ (tcons (tbin₀ mk∪ v) κ))]
+       [(tbin₀ C Tv) (ensure-tcon (λ (v) (cod κ (C Tv v) σ)))])]
+    [_ (error 'step-cod "Bad TKont ~a" κ*)]))
 
 ;; States
-(struct ev (e ρ σ κ) #:transparent)
-(struct co (κ v σ) #:transparent)
-(struct check (ℓ+ ℓ- S v σ κ) #:transparent)
-(struct check-app (ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs σ κ) #:transparent)
-(struct ap (fn vs σ κ) #:transparent)
-(struct ev-syn (Ssyn ρ σ κ) #:transparent)
-(struct send (T ev η σ κ) #:transparent)
+;; Evaluation states
+(struct ev ([e : Expr] [ρ : Env] [σ : Store] [κ : EKont]) #:transparent)
+(struct ap ([fn : Procedure-Value] [vs : (Listof Value)] [σ : Store] [κ : EKont]) #:transparent)
+(struct co ([κ : EKont] [v : Value] [σ : Store]) #:transparent)
+;; Structural contract states
+(struct ev-syn ([Ssyn : SContract] [ρ : Env] [σ : Store] [κ : SKont]) #:transparent)
+(struct cos ([κ : SKont] [v : SContractv] [σ : Store]) #:transparent)
+;; Deriving states
+(struct cod ([κ : TKont] [v : TCon-Value] [σ : Store]) #:transparent)
+(struct send ([T : TCon-Value] [ev : (U call ret)]
+              [ℓ : Module]
+              [η : timeline] [σ : Store] [κ : TKont]) #:transparent)
+;; Checking states
+(struct coc ([κ : CKont] [v : Value] [σ : Store]) #:transparent)
+(struct check ([ℓ+ : Module] [ℓ- : Module] [S : SContractv] [v : Value] [σ : Store] [κ : CKont]) #:transparent)
+(struct check-app ([ℓ- : Module] [Svs- : (Listof SContractv)] [ℓ+ : Module]
+                   [Sv+ : SContractv] [vs-to-check : (Listof Value)]
+                   [ℓ : Label] [η : timeline] [clv : Procedure-Value] [vs-checked : (Listof Value)]
+                   [σ : Store] [κ : EKont]) #:transparent)
+
+(define-type State (U ev co check check-app ap ev-syn send cos cod coc
+                      stuck blame tblame ans))
 
 ;; Final states
-(struct ans (v σ) #:transparent)
-(struct stuck (state msg) #:transparent)
-(struct blame (ℓ S v) #:transparent)
-(struct tblame (ℓ T ev) #:transparent)
+(struct ans ([v : Value] [σ : Store]) #:transparent)
+(struct stuck ([state : State] [msg : String]) #:transparent)
+(struct blame ([ℓ : Module] [S : SContractv] [v : Value]) #:transparent)
+(struct tblame ([ℓ : Label] [T : Value] [ev : (U call ret)]) #:transparent)
 
-(define (alloc ς tag)
-  (gensym tag))
+(: alloc : (-> State (U Symbol String) Any))
+(define (alloc ς tag) (gensym tag))
 
+(define prim-symbols
+  (make-immutable-hash (list (cons '_ -ev-any)
+                             (cons '⊤ -⊤)
+                             (cons '... -⊤)
+                             (cons '⊥ -⊥)
+                             (cons 'ε -ε))))
 (define nullary-prims '(new-timeline))
 (define unary-prims ;; predicates and projections
   '(pair? car cdr null?
+    not
     box? make-box unbox
+    display
     call? call-label call-fn call-args
-    ret? ret-fn ret-label ret-value))
-(define binary-prims '(cons equal? set-box!))
+    ret? ret-fn ret-label ret-value
+    boolean? number? real?))
+(define binary-prims '(cons equal? set-box! <=))
 (define prims (append nullary-prims unary-prims binary-prims))
+(: unary-primop? : (-> Any Boolean : #:+ primop))
 (define (unary-primop? v)
-  (match v [(primop which) #:when (memq which unary-prims) #t] [_ #f]))
+  (and (primop? v)
+       (memq (primop-which v) unary-prims)
+       #t))
 
+(define-predicate procedure-value? Procedure-Value)
+
+(: ev-δ : (-> State Symbol (Listof Value) Store EKont State))
 (define (ev-δ ς which args σ κ)
-  (define (bad num)
-    (stuck ς (format "Primitive expected ~a args, got ~a" num (length args))))
+  (define (arity num) (format "Primitive expected ~a args, got ~a" num (length args)))
+  (: bad : (-> String stuck))
+  (define (bad msg) (stuck ς msg))
+  (: arity-mismatch : (-> Number (U #f stuck)))
   (define (arity-mismatch num)
-    (if (= num (length args)) #f (bad num)))
+    (if (= num (length args))
+        #f
+        (bad (arity num))))
+  (define (bad-preds preds)
+    (format "Primitive expected arguments to match ~a, got ~a" preds args))
+  (: go : (-> Value State))
   (define (go v) (co κ v σ))
   (match which
-    ['cons (or (arity-mismatch 2)
-               ;; already consed
-               (go args))]
+    ['cons (or (arity-mismatch 2) (go (cons (first args) (second args))))]
+    ['not (or (arity-mismatch 1) (go (not (first args))))]
+    ['display
+     (display "Display: ") (for-each display args) (newline)
+     (go (void))]
     ['pair? (or (arity-mismatch 1)
                 (go (pair? (first args))))]
-    ['car (or (arity-mismatch 1)
-              (go (car (first args))))]
-    ['cdr (or (arity-mismatch 1)
-              (go (cdr (first args))))]
+    ['car (if (and (pair? args) (null? (cdr args)) (pair? (car args)))
+              (go (car (car args)))
+              (bad (bad-preds (list pair?))))]
+    ['cdr (if (and (pair? args) (null? (cdr args)) (pair? (car args)))
+              (go (cdr (car args)))
+              (bad (bad-preds (list pair?))))]
     ['null? (or (arity-mismatch 1)
                 (go (null? (first args))))]
     ['new-timeline (or (arity-mismatch 0)
@@ -488,17 +841,30 @@ Expr template:
 
     ['call? (or (arity-mismatch 1)
                 (go (call? (first args))))]
-    ['call-label (or (arity-mismatch 1)
-                     (go (call-ℓ (first args))))]
-    ['call-fn (or (arity-mismatch 1)
-                  (go (call-fn (first args))))]
-    ['call-args (or (arity-mismatch 1)
-                    (go (call-args (first args))))]
+    ['call-label (if (and (pair? args) (null? (cdr args)) (call? (car args)))
+                     (go (call-ℓ (car args)))
+                     (bad (bad-preds (list call?))))]
+    ['call-fn (if (and (pair? args) (null? (cdr args)) (call? (car args)))
+                  (go (call-fn (car args)))
+                  (bad (bad-preds (list call?))))]
+    ['call-args (if (and (pair? args) (null? (cdr args)) (call? (car args)))
+                    (go (call-args (car args)))
+                    (bad (bad-preds (list call?))))]
 
     ['ret? (or (arity-mismatch 1) (go (ret? (first args))))]
-    ['ret-fn (or (arity-mismatch 1) (go (ret-fn (first args))))]
-    ['ret-label (or (arity-mismatch 1) (go (ret-ℓ (first args))))]
-    ['ret-value (or (arity-mismatch 1) (go (ret-v (first args))))]
+    ['ret-fn (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
+                 (go (ret-fn (car args)))
+                 (bad (bad-preds (list ret?))))]
+    ['ret-label (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
+                     (go (ret-ℓ (car args)))
+                     (bad (bad-preds (list ret?))))]
+    ['ret-value (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
+                     (go (ret-v (car args)))
+                     (bad (bad-preds (list ret?))))]
+
+    ['boolean? (or (arity-mismatch 1) (go (boolean? (first args))))]
+    ['number? (or (arity-mismatch 1) (go (number? (first args))))]
+    ['real? (or (arity-mismatch 1) (go (real? (first args))))]
 
     ['box? (or (arity-mismatch 1) (go (boxv? (first args))))]
     ['make-box (or (arity-mismatch 1)
@@ -507,144 +873,182 @@ Expr template:
     ['unbox (or (arity-mismatch 1)
                 (match (first args)
                   [(boxv a) (go (hash-ref σ a))]
-                  [f (stuck ς "unbox expects a box, got ~a" f)]))]
+                  [f (bad (format "unbox expects a box, got ~a" f))]))]
     ['set-box! (match args
                  [(list b v)
                   (match b
                     [(boxv a) (co κ (void) (hash-set σ a v))]
-                    [_ (stuck ς "set-box! expects a box as the first argument, got ~a" b)])]
-                 [_ (bad 2)])]
+                    [_ (bad (format "set-box! expects a box as the first argument, got ~a" b))])]
+                 [_ (bad (arity 2))])]
+
+    ['<= (if (pair? args)
+             (let ([d (cdr args)])
+               (if (pair? d)
+                   (let ([dd (cdr d)])
+                     (if (null? dd)
+                         (let ([a (car args)]
+                               [ad (car d)])
+                           (if (and (real? a) (real? ad))
+                               (go (<= a ad))
+                               (bad (bad-preds (list real? real?)))))
+                         (bad (arity 2))))
+                   (bad (arity 2))))
+             (bad (arity 2)))]
 
     ['equal? (or (arity-mismatch 2)
-                 (go (value-equal? (first args) (secord args) σ)))]))
+                 (go (value-equal? (first args) (second args) σ)))]))
 
+(: restrict-to-fv : (-> Expr Env Env))
 (define (restrict-to-fv e ρ)
   (define dom (fv e))
-  (for/hash ([(x a) (in-hash ρ)]
-             #:when (set-member? dom x))
+  (for/hash : Env ([(x a) (in-hash ρ)]
+                  #:when (set-member? dom x))
     (values x a)))
 
+(: step-ev : (-> ev State))
 (define/match (step-ev ς)
   [((ev e ρ σ κ))
    (match e
-     [(app e0 es) (ev e0 ρ σ (cons (ev es '() ρ) κ))]
+     [(app e0 es) (ev e0 ρ σ (econs (evk es '() ρ) κ))]
      [(lam xs e) (co κ (Clo xs e (restrict-to-fv e ρ)) σ)]
      [(ref x) (co κ (hash-ref σ (hash-ref ρ x)) σ)]
-     [(smon + - Ssyn e) (ev-syn Ssyn ρ σ (cons (sk + - e ρ) κ))]
-     [(tmon ηe T e) (ev ηe ρ σ (cons (mkt T e ρ) κ))]
-     [(ife gu th el) (ev gu ρ σ (cons (ifk th el ρ) κ))]
+     [(smon + - Ssyn e) (ev-syn Ssyn ρ σ (bcons (sk + - e ρ) κ))]
+     [(tmon ηe T) (ev ηe ρ σ (econs (mkt T ρ) κ))]
+     [(ife gu th el) (ev gu ρ σ (econs (ifk th el ρ) κ))]
+
      [(letrece cs body)
       (match cs
         ;; (letrec () e) = e
         ['() (ev body ρ σ κ)]
         ;; Initialize boxes, evaluate first clause.
-        [(cons (cons x e) cs*)
+        [(cons (list x e) cs*)
          (define-values (σ* ρ*)
-           (for/fold ([σ* σ] [ρ* ρ]) ([xe (in-list cs)])
-               (match-define (cons x e) xe)
+           (for/fold ([σ* : Store σ] [ρ* : Env ρ]) ([xe (in-list cs)])
+               (match-define (list x e) xe)
                (define a (alloc ς x))
                (values (hash-set σ* a -undefined)
                        (hash-set ρ* x a))))
-         (ev e ρ* σ* (cons (lrk x cs* body ρ*) κ))])]
-     [(or (? primop?) (? datum?)) (co κ e σ)] ;; e is its own value
+         (ev e ρ* σ* (econs (lrk x cs* body ρ*) κ))])
+      ]
+     [(begine (cons e es)) (ev e ρ σ (econs (begink es ρ) κ))]
+     [(or (? primop?) (? datum?)) (co κ (cast e Value) σ)] ;; e is its own value
 
      ;; atomic contracts that are their own value
-     [(or (? ⊤?) (? ⊥?) (? ε?) (? ev-any?) #;(? ev-none?)
-          )
-      (co κ T σ)]
-     [(ev-pred e) (ev e ρ σ (cons kevpred κ))]
-     [(bind e) (ev e ρ σ (cons kbind κ))]
-     [(kl T) (ev T ρ σ (cons kkl κ))]
-     [(¬ T) (ev T ρ σ (cons kneg κ))]
-     [(· T₀ T₁) (ev T₀ σ σ (cons (kbin₀ mk· T₁ ρ) κ))]
-     [(∪ T₀ T₁) (ev T₀ σ σ (cons (kbin₀ mk∪ T₁ ρ) κ))]
-     [(∩ T₀ T₁) (ev T₀ σ σ (cons (kbin₀ mk∩ T₁ ρ) κ))]
+     [(or (? ⊤?) (? ⊥?) (? ε?))
+      (co κ (cast e TCon-Value) σ)]
+     [(bind e) (ev e ρ σ (econs -clo-to-bind κ))]
+     [(kl T) (ev T ρ σ (econs kkl κ))]
+     [(¬ T) (ev T ρ σ (econs kneg κ))]
+     [(· T₀ T₁) (ev T₀ ρ σ (econs (kbin₀ mk·v T₁ ρ) κ))]
+     [(∪ T₀ T₁) (ev T₀ ρ σ (econs (kbin₀ mk∪v T₁ ρ) κ))]
+     [(∩ T₀ T₁) (ev T₀ ρ σ (econs (kbin₀ mk∩v T₁ ρ) κ))]
      [_ (error 'step-ev "Bad expression ~a" e)])])
 
-(define/match (step-co ς)
-  [((co '() v σ)) (ans v σ)]
-  [((co (cons φ κ) v σ))
-   (match φ
-     ;; Evaluating
-     [(evk '() vs ρ)
-      (match-define (cons v0 vs*) (reverse (cons v vs)))
-      (ap v0 vs* σ κ)]
+(: step-co : (-> co State))
+(define (step-co ς)
+  (match-define (co κ* v σ) ς)
+  (: ensure-tcon : (-> (-> TCon-Value State) State))
+  (define (ensure-tcon f)
+    (if (tcon-value? v)
+        (f v)
+        (stuck ς "Expected a temporal contract value")))
+  (match κ*
+   ['() (ans v σ)]
+   [(acons φ κ) ;; co --> cos
+    (match φ
+      [(arrk Svs- Sv+ ℓ)
+       (if (timeline? v)
+           ;; arrk is always on top of an SCon-Frame
+           (cos κ (-->/blessed (reverse Svs-) Sv+ ℓ v) σ)
+           (stuck ς "--> contract requires a timeline."))]
+      [(? mkflat?)
+       (if (procedure-value? v)
+           (cos κ v σ)
+           (stuck ς "Non-procedure cannot be a structural contract"))])]
+   [(pcons φ κ) ;; co -> cod
+    (match φ
+      [(mk-tcon) (ensure-tcon (λ (v) (cod κ v σ)))]
+      [(pred-to-T) (cod κ (if v -ε -⊥) σ)])]
+   [(vcons (flatk v-checked fn ℓ-) κ) ;; co -> check
+    (if v
+        (coc κ v-checked σ)
+        (blame ℓ- fn (format "Flat contract failed on ~a" v-checked)))]
+   [(econs φ κ)
+    (match φ
+      ;; Evaluating
+      [(evk '() vs ρ)
+       (match-define (cons v0 vs*) (reverse (cons v vs)))
+       (if (procedure-value? v0)
+           (ap v0 vs* σ κ)
+           (stuck ς "Expected a procedure value in applied position"))]
 
-     [(evk (cons e0 es) vs ρ)
-      (ev e0 ρ σ (cons (evk es (cons v vs) ρ) κ))]
+      [(evk (cons e0 es) vs ρ)
+       (ev e0 ρ σ (econs (evk es (cons v vs) ρ) κ))]
 
-     [(ifk th el ρ) (ev (if v th el) ρ σ κ)]
+      [(ifk th el ρ) (ev (if v th el) ρ σ κ)]
 
-     [(lrk x cs body ρ)
-      (define σ* (hash-set σ (hash-ref ρ x) v))
-      (match cs
-        ['() (ev body ρ σ* κ)]
-        [(cons (cons y e*) cs*)
-         (ev e* ρ σ* (cons (lrk y cs* body ρ) κ))])]
+      [(lrk x cs body ρ)
+       (define σ* (hash-set σ (hash-ref ρ x) v))
+       (match cs
+         ['() (ev body ρ σ* κ)]
+         [(cons (list y e*) cs*)
+          (ev e* ρ σ* (econs (lrk y cs* body ρ) κ))])]
 
-     [(sk + - e ρ) ;; v is a structural contract
-      (ev e ρ σ (cons (wrapk + - v) κ))]
+      ;; Constructing temporal contracts
+      [(clo-to-bind)
+       (match v
+         [(? weakly?) (co κ v σ)]
+         [_ (co κ (weakly v) σ)]
+         [_ (stuck ς "Bind expects a unary function")])]
+      [(mkt T ρ) (ev T ρ σ κ)]
+      [(kunitary C) (ensure-tcon (λ (v) (co κ (C v) σ)))]
+      [(kbin₀ C T ρ) (ensure-tcon (λ (v) (ev T ρ σ (econs (kbin₁ C v) κ))))]
+      [(kbin₁ C Tv) (ensure-tcon (λ (v) (co κ (C Tv v) σ)))]
 
-     ;; Constructing temporal contracts
-     [(mkt T e ρ) (ev T ρ σ (cons (begink e ρ) κ))]
-     [(kunitary C) (co κ (C v) σ)]
-     [(kbin₀ C T ρ) (ev T ρ σ (cons (kbin₁ C v) κ))]
-     [(kbin₁ C Tv) (co κ (C Tv v) σ)]
+      ;; Run in context of a temporal contract
+      [(begink es ρ)
+       (match es
+         ['() (co κ v σ)]
+         [(cons e es) (ev e ρ σ (econs (begink es ρ) κ))])]
 
-     ;; Derivatives of temporal contracts
-     [(pred-to-T) (co κ (if v -ε -⊥) σ)]
-     [(seqk T₁) (co κ (mk· v T₁) σ)]
-     [(seq2k T₁ ev η ℓ) 
-      ;; v is ∂_ev(T₀)
-      (error 'todo)
-      (send T₁ ev η ℓ σ (cons (tbin₀ mk∪ v) κ))]
-     [(tbin₀ C Tv) (co κ (C Tv v) σ)]
+      ;; Messaging
+      [(chk ℓ+ ℓ- Sv+ clv ℓ η)
+       ;; check return value first, then send message to timeline.
+       (check ℓ+ ℓ- Sv+ v σ (hcons (sret ℓ+ clv ℓ η) κ))] ;; blame or do call
 
-     ;; Constructing structural contracts
-     [(timelinek vs ℓ e ρ)
-      (ev e ρ σ (cons (arrk vs v ℓ) κ))]
-     [(arrk vs- v+ ℓ) ;; v is a timeline
-      (if (timeline? v)
-          (co κ (-->/blessed (reverse vs-) v+ ℓ v) σ)
-          (stuck ς "--> contract requires a timeline."))]
-     [(negk '() S+ ℓ e ρ Svs-) (ev-syn S+ ρ σ (cons (timelinek Svs- ℓ e ρ) κ))]
-     [(negk (cons S- Ss-) S+ ℓ e ρ Svs-)
-      (ev-syn S- ρ σ (cons (negk Ss- S+ ℓ e ρ (cons v Svs-)) κ))]
-     [(mkd D ρ) (ev-syn D ρ σ (cons (mkcons v) κ))]
-     [(mkcons A) (co κ (cons/blessed A v) σ)]
+      ;; Constructing the whole smon contract requires checking upfront.
+      [(wrapk ℓ+ ℓ- Sv)
+       (check ℓ+ ℓ- Sv v σ (hcons -checking κ))]
+      [(consk Av) (co κ (cons Av v) σ)]
 
-     ;; Messaging
-     [(chk ℓ+ ℓ- Sv+ clv ℓ η) ;; check return value first, then send message to timeline.
-      (check ℓ+ ℓ- Sv+ v (hash-set σ η v) (cons (sret ℓ+ clv ℓ η) κ))]
-     ;; blame or do call
-     [(blcall ℓ- ℓ+ Sv+ clv vs* ℓ η)
-      ;; Temporal contract has been derived against call message.
-      ;; If it's blatantly bad, then blame.
-      (if (μ? v)
-          (tblame ℓ- (hash-ref σ η -⊤))
-          (ap clv vs* σ (cons (chk ℓ+ ℓ- Sv+ clv ℓ η) κ)))]
-     ;; blame or continue with return
-     [(blret ℓ+ η rv)
-      ;; Temporal contract has been derived against return message.
-      ;; If it's blatantly bad, then blame.
-      (if (μ? v)
-          (tblame ℓ+ (hash-ref σ η -⊤))
-          (co κ rv (hash-set σ η v)))]
-     ;; send the return message with the wrapped return value
-     [(sret ℓ+ clv ℓ η)
-      (send (hash-ref σ η -⊤) (ret ℓ clv v) η ℓ σ (cons (blret ℓ+ η v) κ))]
+      [_ (error 'step-co "Bad frame ~a" φ)])]
+   [_ (error 'step-co "Bad EKont ~a" κ*)]))
 
-     ;; Checking
-     [(wrapk ℓ+ ℓ- Sv)
-      (check ℓ+ ℓ- Sv v σ κ)]
-     [(chDk ℓ+ ℓ- D v) (check ℓ+ ℓ- D v σ κ)]
-     [(ch*k ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs)
-      (check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs σ κ)]     
+(: step-cos : (-> cos State))
+(define (step-cos ς)
+  (match-define (cos κ* Sv σ) ς)
+  (match κ*
+    [(bcons (sk + - e ρ) κ) ;; κ is an EKont
+     (ev e ρ σ (econs (wrapk + - Sv) κ))]
+    [(scons φ κ)
+     (match φ
+       ;; Constructing structural contracts
+       [(timelinek Svs ℓ e ρ)
+        (ev e ρ σ (acons (arrk Svs Sv ℓ) κ))]
 
-     [_ (error 'step-co "Bad frame ~a" φ)])])
+       [(negk '() S+ ℓ e ρ Svs-)
+        (ev-syn S+ ρ σ (scons (timelinek (cons Sv Svs-) ℓ e ρ) κ))]
 
+       [(negk (cons S- Ss-) S+ ℓ e ρ Svs-)
+        (ev-syn S- ρ σ (scons (negk Ss- S+ ℓ e ρ (cons Sv Svs-)) κ))]
+       [(mkd D ρ) (ev-syn D ρ σ (scons (mkcons Sv) κ))]
+       [(mkcons A) (cos κ (cons/blessed A Sv) σ)]
+       [_ (error 'step-cos "Bad frame ~a" φ)])]))
+
+(: step-ap : (-> ap State))
 (define/match (step-ap ς)
   [((ap fn vs σ κ))
+   (: app : (-> (Listof Symbol) Expr Env (Listof Value) State))
    (define (app xs e ρ vs)
      (let bind ([xs xs] [vs vs] [ρ ρ] [σ σ])
        (match* (xs vs)
@@ -653,208 +1057,304 @@ Expr template:
           (define a (alloc ς x))
           (bind xs vs (hash-set ρ x a) (hash-set σ a v))]
          [(_ _) (stuck ς "Arity mismatch for function application")])))
+   (: wrap : (-> Value (Listof Value) State))
+   (define (wrap fn vs)
+     (match fn
+       [(Clo xs e ρ) (app xs e ρ vs)]
+       [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
+        (check-app ℓ- Svs- ℓ+ Sv+ vs ℓ η clv '() σ κ)]
+       [(primop which) (ev-δ ς which vs σ κ)]))
    (match fn
-     [(Clo xs e ρ) (app xs e ρ vs)]
-     [(WClo xs e ρ) (app xs e ρ (map weak vs))]
-     [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
-      (check-app ℓ- Svs- ℓ+ Sv+ vs '() ℓ η clv σ κ)]
-     [(primop which) (ev-δ ς which vs σ κ)])])
+     [(weakly clv) (wrap clv (map weak vs))]
+     [clv (wrap clv vs)])])
 
+(: step-ev-syn (-> ev-syn State))
 (define/match (step-ev-syn ς)
   [((ev-syn S ρ σ κ))
    (match S
-     [(--> '() S+ ℓ e) (ev-syn S+ ρ σ (cons (timelinek '() ℓ e ρ) κ))]
+     [(--> '() S+ ℓ e) (ev-syn S+ ρ σ (scons (timelinek '() ℓ e ρ) κ))]
      [(--> (cons S- Ss-) S+ ℓ e)
-      (ev-syn S- ρ σ (cons (negk Ss- S+ ℓ e ρ '()) κ))]
+      (ev-syn S- ρ σ (scons (negk Ss- S+ ℓ e ρ '()) κ))]
 
      [(cons/c A D)
-      (ev-syn A ρ σ (cons (mkd D ρ) κ))]
+      (ev-syn A ρ σ (scons (mkd D ρ) κ))]
 
      ;; only unary functions are contracts
-     [(or (? unary-primop?)
-          (Clo (list _) _ _)
-          (Clo/blessed _ _ (list _) _ _ _ _))
-      (co κ S σ)]
+     [(and (or (? unary-primop?)
+               (? any/c?))
+           Sv)
+      (cos κ Sv σ)]
 
-     [_ (stuck ς "Bad structural contract")])])
+     ;; Must delimit κ to show that e is evaluated in an SKont context
+     [e (ev (cast e Expr) ρ σ (acons -mkflat κ))])])
 
 ;; Derivatives!
+(: step-send : (-> send State))
 (define/match (step-send ς)
-  [((send T ev η σ κ))
+  [((send T ev ℓ- η σ κ))
    (match T
-     [(or (? ε?) #;(? ev-none?)
+     [(or (? ε?) #;(? ev-none?) (? ⊥?)
           )
-      (co κ -⊥ σ)]
-     [(ev-predv v) (ap v ev σ (cons -pred-to-T κ))]
-     [(bindv v) (ap v ev σ κ)]
-     [(kl T*) (send T* ev η σ (cons (seqk T) κ))]
-     [(¬ T*) (send T* ev η σ (cons negt κ))]
-     [(· T₀ T₁) (send T₀ ev η σ (cons (if (ν? T₀) (seq2k T₁ ev η) (seqk T₁)) κ))]
-     [(∪ T₀ T₁) (send T₀ ev η σ (cons (tbin₀ mk∪ T₁) κ))]
-     [(∩ T₀ T₁) (send T₀ ev η σ (cons (tbin₀ mk∩ T₁) κ))])])
+      (cod κ -⊥ σ)]
+     [(? ⊤?) (cod κ -⊤ σ)] ;; ??
 
+     [(bindv v) (ap v (list ev) σ (pcons -mk-tcon κ))]
+     [(klv T*) (send T* ev ℓ- η σ (tcons (seqk T) κ))]
+     [(¬v T*) (send T* ev ℓ- η σ (tcons negt κ))]
+     [(·v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (if (ν?v T₀) (seq2k T₁ ev η ℓ-) (seqk T₁)) κ))]
+     [(∪v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∪v T₁) κ))]
+     [(∩v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∩v T₁) κ))]
+     [(? procedure-value? v) (ap v (list ev) σ (pcons -pred-to-T κ))]
+     [_ (error 'step-send "Unhandled temporal contract ~a" T)])])
+
+(: step-check-app : (-> check-app State))
 (define/match (step-check-app ς)
-  [((check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs σ κ))
-   (match* (Svs- vs)
+  [((check-app ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv vs-checked σ κ))
+   (match* (Svs- vs-to-check)
      [('() '())
-      (send (hash-ref σ η -⊤) (call ℓ clv vs*) η σ (cons (blcall ℓ- ℓ+ Sv+ clv vs* ℓ η) κ))]
-     [((cons Sv- Svs-*) (cons v1 vs**))
-      (check ℓ- ℓ+ Sv- v1 σ (cons (ch*k ℓ- Svs-* ℓ+ Sv+ vs** ℓ η clv vs*) κ))]
+      (define args-checked (reverse vs-checked))
+      (define ev (call ℓ clv args-checked))
+      (define Tv (hash-ref σ η (λ () -⊤)))
+      (if (tcon-value? Tv)
+          (send Tv
+                ev
+                ℓ-
+                η σ
+                (lcons (blcall ℓ- ℓ+ Sv+ clv args-checked ℓ ev η) κ))
+          (error 'step-check-app "Somehow timeline maps to non-tcon-value ~a" ς))]
+     [((cons Sv- Svs-*) (cons v1 vs-to-check*))
+      (check ℓ- ℓ+ Sv- v1 σ (hcons (ch*k ℓ- Svs-* ℓ+ Sv+ vs-to-check* ℓ η clv vs-checked) κ))]
      [(_ _) (stuck ς "Arity mismatch for blessed application")])])
 
+(: step-check : (-> check State))
 (define/match (step-check ς)
   [((check ℓ+ ℓ- S v σ κ))
-   (match S
-     [(-->/blessed Svs- Sv+ ℓ η)
-      (match v
-        [(or (Clo args _ _) (Clo/blessed _ _ args _ _ _ _))
-         #:when (= (length args) (length Svs-))
-         (co κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v) σ)]
-        [_  (blame ℓ S v)])]
-     [(cons/blessed Av Dv)
-      (match v
-        [(cons A D)
-         (check ℓ+ ℓ- A v σ (cons (chDk ℓ+ ℓ- Dv D) κ))]
-        [_ (blame ℓ+ S v)])]
-     [_ (error 'step-check "Bad structural contract ~a" S)])])
+   (cond [(-->/blessed? S)
+          (match-define (-->/blessed Svs- Sv+ ℓ η) S)
+          (match v
+            [(or (Clo args _ _) (Clo/blessed _ _ args _ _ _ _))
+             #:when (= (length (cast args (Listof Any))) (length Svs-))
+             (coc κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v) σ)]
+            [_  (blame ℓ S v)])]
+         [(cons/blessed? S)
+          (match-define (cons/blessed Av Dv) S)
+          (match v
+            [(cons A D)
+             (check ℓ+ ℓ- Av A σ (ccons (chDk ℓ+ ℓ- Dv D) κ))]
+            [_ (blame ℓ+ S v)])]
+         [(any/c? S) (coc κ v σ)]
+         [else (ap S (list v) σ (vcons (flatk v S ℓ-) κ))])])
 
+(: step : (-> State State))
 (define (step ς)
   (cond [(ev? ς) (step-ev ς)]
         [(co? ς) (step-co ς)]
         [(ap? ς) (step-ap ς)]
         [(check? ς) (step-check ς)]
         [(ev-syn? ς) (step-ev-syn ς)]
+        [(cos? ς) (step-cos ς)]
+        [(cod? ς) (step-cod ς)]
+        [(coc? ς) (step-coc ς)]
         [(check-app? ς) (step-check-app ς)]
-        [(send? ς) (step-send ς)]))
+        [(send? ς) (step-send ς)]
+        [else (error 'step "Unknown state ~a" ς)]))
 
+(: run : (-> State State))
 (define (run ς)
   (if (or (ans? ς) (blame? ς) (tblame? ς) (stuck? ς))
       ς
       (run (step ς))))
 
-(define (parse sexp [ρ (hasheq)])
+(define-type Renaming (HashTable Symbol Symbol))
+(: parse : (->* (Any) [Renaming] Expr))
+(define (parse sexp [ρ ((inst hasheq Symbol Symbol))])
   (define (p* sexp) (parse sexp ρ))
-    (define (is-app [sexp sexp])
-      (app (p* (first sexp)) (map p* (rest sexp))))
-    (define (if-builtin name f)
-      (if (hash-has-key? ρ name) (is-app) (f)))
-    (define (defn-ctx sexps ρ)
-      (unless (pair? sexps) (error 'defn-ctx "Expected at least one expression"))
-      (define ρ*
-        (for/fold ([ρ* ρ]) ([s (in-list sexps)])
-          (match s
-            [`(define ,(? symbol? name) ,rhs)
-             (if (hash-has-key? ρ* 'define)
-                 ρ*
-                 (hash-set ρ* name (gensym name)))]
-            [`(define (,(? symbol? name) ,(? symbol? args) ...) . ,rhs)
-             (if (hash-has-key? ρ* 'define)
-                 ρ*
-                 (λ () (hash-set ρ* name (gensym name))))]
-            [`(define . ,rest)
-             (if (hash-has-key? ρ* 'define)
-                 ρ*
-                 (error 'defn-ctx "Ill-formed define form"))]
-            [_ ρ*])))
-      (let loop ([ss sexps] [rev-clauses '()] [redefined? (hash-has-key? ρ 'define)])
-        (match ss
-          [(list (and e `(define ,x ,r)))
-           (if redefined?
-               (letrece (reverse rev-clauses) (parse e ρ*))
-               (error 'defn-ctx "Expected last form to be an expression, not a definition: ~a" e))]
-          [(list e) (letrece (reverse rev-clauses) (parse e ρ*))]
-          [(cons s ss)
-           (define (expr)
-             (loop ss
-                   (cons (cons (gensym 'dummy) (parse s ρ*)) rev-clauses)
-                   redefined?))
-           (match s
-             [`(define ,x ,r)
-              (cond
-               [redefined? (expr)]
-               [else
-                (define-values (name rhs)
-                  (cond
-                   [(symbol? x) (values x (parse r ρ*))]
-                   [else
-                    (match-define (cons name formals) x)
-                    (define xs* (map gensym formals))
-                    (define ρ** (apply hash-set* ρ* (map list formals xs*)))
-                    (values name (lam xs* (parse r ρ**)))]))
-                (loop ss
-                      (cons (cons name rhs) rev-clauses)
-                      (eq? name 'define))])]
-             [_ (expr)])])))
-    (match sexp
-      [(? symbol? x)
-       (define x* (hash-ref ρ x x))
-       (if (memq x* prims)
-           (primop x*)
-           (ref x*))]
-      [`(,(and head (or 'λ 'lambda)) (,(? symbol? xs) ...) . ,body)
-       (if-builtin head
-                   (λ ()
-                      (define xs* (map gensym xs))
-                      (define ρ* (apply hash-set* ρ (append-map list xs xs*)))
-                      (lam xs* (defn-ctx body ρ*))))]
-      [`(letrec ,([,(? symbol? xs) ,es] ...) . ,body)
-       (if-builtin 'letrec
-                   (λ ()
-                      (define xs* (map gensym xs))
-                      (define ρ* (apply hash-set* ρ (append-map list xs xs*)))
-                      (letrece (for/list ([x (in-list xs*)] [e (in-list es)])
-                                 (cons x (parse e ρ*)))
-                               (defn-ctx body ρ*))))]
-      [`(smon ',(? symbol? +) ',(? symbol? -) ,S ,e)
-       (if-builtin 'smon
-                   (λ () (smon + - (parse-scon S ρ) (p* e))))]
-      [`(tmon ηe T e)
-       (if-builtin 'tmon
-                   (λ () (tmon (p* ηe) (parse-tcon T ρ) (p* e))))]
-      [`(if ,g ,t ,e)
-       (if-builtin 'if
-                   (λ () (ife (p* g) (p* t) (p* e))))]
+  (: is-app : (->* () ((Listof Any)) Expr))
+  (define (is-app [sexp (cast sexp (Listof Any))])
+    (app (p* (first sexp)) (map p* (rest sexp))))
+  (: if-builtin : (-> Symbol (-> Expr) Expr))
+  (define (if-builtin name f)
+    (if (hash-has-key? ρ name) (is-app) (f)))
+  (: defn-ctx : (-> (Listof Any) Renaming Expr))
+  (define (defn-ctx sexps ρ)
+    (unless (pair? sexps) (error 'defn-ctx "Expected at least one expression"))
+    (define ρ*
+      (for/fold ([ρ* : Renaming ρ]) ([s (in-list sexps)])
+        (match s
+          [`(define ,(? symbol? name) ,rhs)
+           (if (hash-has-key? ρ* 'define)
+               ρ*
+               (hash-set ρ* name (gensym name)))]
+          [`(define (,(? symbol? name) ,(? symbol? args) ...) ,rhs ...)
+           (if (hash-has-key? ρ* 'define)
+               ρ*
+               (hash-set ρ* name (gensym name)))]
+          [`(define . ,rest)
+           (if (hash-has-key? ρ* 'define)
+               ρ*
+               (error 'defn-ctx "Ill-formed define form"))]
+          [_ ρ*])))
+    (: loop : (-> (Listof Any)
+                  (Listof (List Symbol Expr))
+                  (Listof Expr)
+                  Boolean Expr))
+    (define (loop ss rev-clauses since-last-define redefined?)
+      (define (finish e)
+        (*letrece (reverse rev-clauses)
+                  (begine (cast (append (reverse since-last-define)
+                                        (list (parse e ρ*)))
+                                (Pairof Expr (Listof Expr))))))
+      (match ss
+        [(list (and e `(define ,x ,r)))
+         (if redefined?
+             (finish e)
+             (error 'defn-ctx "Expected last form to be an expression, not a definition: ~a" e))]
+        [(list e) (finish e)]
+        [(cons s ss)
+         (define (expr)
+           (loop ss
+                 rev-clauses
+                 (cons (parse s ρ*) since-last-define)
+                 redefined?))
+         (match s
+           [`(define ,x ,r)
+            (cond
+             [redefined? (expr)]
+             [else
+              (: name : Symbol)
+              (: rhs : Expr)
+              (define-values (name rhs)
+                (cond
+                 [(symbol? x) (values (hash-ref ρ* x) (parse r ρ*))]
+                 [else
+                  (match-define (cons name formals) x)
+                  (define name* (cast name Symbol))
+                  (define formals* (cast formals (Listof Symbol)))
+                  (: xs* : (Listof Symbol))
+                  (define xs* ((inst map Symbol Symbol)
+                               gensym
+                               formals*))
+                  (define ρ** (hash-set-many ρ* formals* xs*))
+                  (values (hash-ref ρ* name*) (lam xs* (parse r ρ**)))]))
+              (loop ss
+                    (cons (list name rhs)
+                          (append (map (λ ([e : Expr]) (list (gensym 'dummy) e)) since-last-define)
+                                  rev-clauses))
+                    '()
+                    (eq? name 'define))])]
+           [_ (expr)])]))
+    (loop sexps '() '() (hash-has-key? ρ 'define)))
+  (match sexp
+    ;; other symbols
+    [(? symbol? x)
+     (define x* (hash-ref ρ x (λ () x)))
+     (if (memq x* prims)
+         (primop x*)
+         (hash-ref prim-symbols x* (λ () (ref x*))))]
+    [`(,(and head (or 'λ 'lambda)) (,(? symbol? xs) ...) ,body ...)
+     (if-builtin head
+                 (λ ()
+                    (define xs0 (cast xs (Listof Symbol)))
+                    (define xs* ((inst map Symbol Symbol) gensym
+                                 xs0))
+                    (define ρ* (hash-set-many ρ xs0 xs*))
+                    (lam xs* (defn-ctx body ρ*))))]
+    [`(letrec ([,(? symbol? xs) ,es] ...) ,body ...)
+     (if-builtin 'letrec
+                 (λ ()
+                    (define xs0 (cast xs (Listof Symbol)))
+                    (define xs* ((inst map Symbol Symbol) gensym xs0))
+                    (define ρ* (hash-set-many ρ xs0 xs*))
+                    (*letrece (for/list ([x (in-list xs*)] [e (in-list es)])
+                                (list x (parse e ρ*)))
+                              (defn-ctx body ρ*))))]
+    [`(smon ',(? symbol? +) ',(? symbol? -) ,S ,e)
+     (if-builtin 'smon
+                 (λ () (smon + - (parse-scon S ρ) (p* e))))]
+    [`(tmon ,ηe ,T)
+     (if-builtin 'tmon
+                 (λ () (tmon (p* ηe) (p* T))))]
+    [`(if ,g ,t ,e)
+     (if-builtin 'if
+                 (λ () (ife (p* g) (p* t) (p* e))))]
+    [`(begin ,e ,es ...)
+     (if-builtin 'begin (λ () (begine (cons (p* e) (map p* es)))))]
 
-      ;; macros
-      [`(let ([,(? symbol? xs) ,es] ...) . ,body)
-       (if-builtin 'let
-                   (λ () (p* `((λ ,xs . ,body) . ,es))))]
-      [`(or ,e ...)
-       (if-builtin 'or (λ ()
-                          (let rec ([es e])
-                            (match es
-                              ['() #f]
-                              [(list e) (p* e)]
-                              [(cons e rest)
-                               ;; (let ([t e]) (if t t (or . rest)))
-                               (define t (gensym 'tmp))
-                               (app (lam (list t)
-                                         (ife (ref t) (ref t) (rec rest)))
-                                    (list (p* e)))]))))]
-      [`(and ,e ...)
-       (if-builtin 'and (λ ()
-                           (let rec ([es e])
+    ;; temporal contracts are expressions too, since bind produces tcons
+    [`(* ,T) (if-builtin '* (λ () (kl (p* T))))]
+    [`(∪ ,T ...) (if-builtin '∪ (λ () (rassoc mk∪ -⊥ (map p* T))))]
+    [`(∩ ,T ...) (if-builtin '∩ (λ () (rassoc mk∩ -⊤ (map p* T))))]
+    [`(· ,T ...) (if-builtin '· (λ () (rassoc mk· -ε (map p* T))))]
+    [`(¬ ,T) (if-builtin '¬ (λ () (mk¬ (p* T))))]
+    [`(bind ,e) (if-builtin 'bind (λ () (bind (p* e))))]
+
+    ;; macros
+    [`(let ([,(? symbol? xs) ,es] ...) ,body ...)
+     (if-builtin 'let
+                 (λ () (p* `((λ ,xs . ,body) . ,es))))]
+    [`(or ,e ...)
+     (if-builtin 'or (λ ()
+                        (let rec : Expr ([es : (Listof Any) e])
                              (match es
-                               ['() #t]
+                               ['() #f]
                                [(list e) (p* e)]
-                               [(cons e rest) (ife (p* e) (rec rest) #f)]))))]
+                               [(cons e rest)
+                                ;; (let ([t e]) (if t t (or . rest)))
+                                (define t (gensym 'tmp))
+                                (app (lam (list t)
+                                          (ife (ref t) (ref t) (rec rest)))
+                                     (list (p* e)))]))))]
+    [`(and ,e ...)
+     (if-builtin 'and (λ ()
+                         (let rec : Expr ([es : (Listof Any) e])
+                              (match es
+                                ['() #t]
+                                [(list e) (p* e)]
+                                [(cons e rest) (ife (p* e) (rec rest) #f)]))))]
+    [`(cond [,gs ,rhss ...] ... [else ,last ...])
+     (if-builtin 'cond
+                 (λ ()
+                    (let rec : Expr
+                         ([gs : (Listof Any) gs]
+                          [rhss : (Listof (Listof Any)) (cast rhss (Listof (Listof Any)))])
+                         (match* (gs rhss)
+                           [('() '())
+                            (defn-ctx last ρ)]
+                           [((cons g gs) (cons rhs rhss))
+                            (ife (p* g)
+                                 (defn-ctx rhs ρ)
+                                 (rec gs rhss))]))))]
 
-      ;; fall-through application
-      [`(,e . ,es) (is-app)]
-      [_ (error 'parse "Bad expression ~a" sexp)]))
+    ;; back to expressions
 
+    [`(quote ,(? datum? d)) (if-builtin 'quote (λ () d))]
+    ;; fall-through application
+    [`(,e . ,es) (is-app)]
+    [(? datum? sexp) sexp]
+    [_ (error 'parse "Bad expression ~a" sexp)]))
+
+(: parse-scon : (-> Any Renaming SContract))
 (define (parse-scon S ρ)
   (define (parse-scon* S) (parse-scon S ρ))
   (match S
     [`(-> ,S- ... ,S+ : ',(? symbol? ℓ) @ ,e)
-     (--> (map parse-scon* S-)
-          (parse-scon* S+)
-          ℓ
-          (parse e ρ))]
+     (if (hash-has-key? ρ '->)
+         (parse S ρ)
+         (--> (map parse-scon* S-)
+              (parse-scon* S+)
+              ℓ
+              (parse e ρ)))]
     [`(cons/c ,A ,D)
-     (cons/c (parse-scon* A) (parse-scon* D))]
+     (if (hash-has-key? ρ 'cons/c)
+         (parse S ρ)
+         (cons/c (parse-scon* A) (parse-scon* D)))]
+    [(and (or 'any 'any/c) S)
+     (if (hash-has-key? ρ S)
+         (ref (hash-ref ρ S))
+         -any/c)]
     [e (parse e ρ)]))
 
+(: rassoc : (All (A) (-> (-> A A A) A (Listof A) A)))
 (define (rassoc bin ⊥ lst)
   (match lst
     [(cons x y)
@@ -862,24 +1362,6 @@ Expr template:
          x
          (bin x (rassoc bin ⊥ y)))]
     ['() ⊥]))
-
-(define (parse-tcon T ρ)
-  (define (p* T) (parse-tcon T ρ))
-  (define (if-builtin name f)
-    (if (hash-has-key? ρ name) (ev-pred (parse T ρ)) (f)))
-  (match T
-    [`(* ,T) (if-builtin '* (λ () (kl (p* T))))]
-    [`(∪ ,T ...) (if-builtin '∪ (λ () (rassoc mk∪ -⊥ (map p* T))))]
-    [`(∩ ,T ...) (if-builtin '∩ (λ () (rassoc mk∩ -⊤ (map p* T))))]
-    [`(· ,T ...) (if-builtin '· (λ () (rassoc mk· -ε (map p* T))))]
-    [`(¬ ,T) (if-builtin '¬ (λ () (mk¬ (p* T))))]
-    [`_ (if-builtin '_ (λ () -ev-any))]
-    [`⊤ (if-builtin '⊤ (λ () -⊤))]
-    [`... (if-builtin '... (λ () -⊤))]
-    [`⊥ (if-builtin '⊥ (λ () -⊥))]
-    [`ε (if-builtin '⊥ (λ () -ε))]
-    [`(bind ,e) (if-builtin 'bind (λ () (bind (parse e ρ))))]
-    [_ (error 'parse-tcon "Bad temporal contract ~a" T)]))
 
 (define example
   '(let ()
@@ -894,43 +1376,51 @@ Expr template:
                      (cons a lst)
                      (cons l0 ((insert cmp) a (cdr lst))))])))
      (define (foldl f b lst)
-       (if (null? lst)
-           b
-           (foldl f (f (car lst) b) (cdr lst))))
+       (if (pair? lst)
+           (foldl f (f (car lst) b) (cdr lst))
+           b))
      (define (sort cmp lst)
        (foldl (insert cmp) '() lst))
      (define (listof f)
        (λ (lst)
-          (or (null? lst)
-              (and (f (car lst)) ((listof f) (cdr lst))))))
+          (if (pair? lst)
+              (and (f (car lst)) ((listof f) (cdr lst)))
+              (null? lst))))
      (define η (new-timeline))
-     (define csort 
+     (define csort
        (smon 'user 'context
              (->
-              (-> number? number? boolean? : 'cmp @ η)
-              (listof number?)
+              (-> real? real? boolean? : 'cmp @ η)
+              (listof real?)
               any
               : 'sort @ η)
              sort))
-     (define lst (list 1 2 3 4))
-     (tmon η
-      (∩ (¬ (· ...
-               (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))
-               (star (λ (ev) (or (not (ret? ev))
-                                 (not (equal? 'sort (ret-label ev))))))
-               (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))))
-           
-           (¬ (· ...
-                 (bind
-                  (λ (ev)
-                     (if (and (call? ev)
-                              (equal? 'sort (call-label ev)))
-                         (· ...))
-                     (call (label sort) (? cmp) _)
-                     (·  ...
-                         (ret (label sort) _)
-                         ...
-                         (call ($ cmp) _ _))))))))
-     (csort (λ (x y) (<= x y)) lst)))
+     (define lst (cons 1 (cons 2 (cons 3 (cons 4 '())))))
+     (display csort)
+     (csort (λ (x y) (display x) (<= x y)) lst)
+     (begin
+       (tmon η
+            (∩ (¬ (· ...
+                     (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))
+                     (* (λ (ev) (or (not (ret? ev))
+                                    (not (equal? 'sort (ret-label ev))))))
+                     (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))))
 
-(run (ev (parse example) (hash) (hash) '()))
+               (¬ (· ...
+                     (bind
+                      (λ (ev)
+                         (if (and (call? ev)
+                                  (equal? 'sort (call-label ev)))
+                             (·  ...
+                                 (λ (ev) (and (ret? ev) (equal? 'sort (ret-label ev))))
+                                 ...
+                                 (λ (ev*) (and (call? ev*) (equal? (car (call-args ev))
+                                                                   (call-fn ev*)))))
+                             ⊥)))))))
+       (csort (λ (x y) (<= x y)) lst))))
+
+(define expr (parse example))
+(unless (set-empty? (fv expr))
+  (error 'example "Free variables in program ~a" (fv expr)))
+
+(run (ev expr (hash) (hash) '()))
