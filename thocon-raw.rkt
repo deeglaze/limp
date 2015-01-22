@@ -1,7 +1,9 @@
 #lang typed/racket/base
 (require (for-syntax racket/base)
          racket/match racket/list racket/set)
-(require/typed racket/pretty [pretty-print (-> Any Void)])
+(require/typed racket/pretty [pretty-print (-> Any Void)]
+               [pretty-write (-> Any Void)])
+(require/typed racket/port [with-output-to-string (-> (-> Any) String)])
 
 (define-syntax (??? stx) #'(error 'todo))
 
@@ -57,6 +59,16 @@ Expr template:
     [(letrece cs e) ???]
     [(begine es) ???]
     [(primop which) ???]
+    [(? datum?) ???]
+    [(∩ T0 T1) ???]
+    [(∪ T0 T1) ???]
+    [(· T0 T1) ???]
+    [(¬ T) ???]
+    [(kl T) ???]
+    [(bind e) ???]
+    [(ε) ???]
+    [(⊤) ???]
+    [(⊥) ???]
     [_ (error who "Bad expression ~a" e)])
 |#
 (: first* (All (A B) (-> (List A B) A)))
@@ -135,7 +147,9 @@ Expr template:
                       call ret ;; event objects
                       TCon-Value))
 (define-type Procedure-Value (U Clo Clo/blessed weakly primop))
-(define-type TCon-Value (U Procedure-Value ⊤ ⊥ ε klv ·v ∪v ∩v ¬v))
+(define-type Non-Wrap-TCon-Value (U ⊤ ⊥ ε klv ·v ∪v ∩v ¬v weakly primop bindv))
+(define-type TCon-Value (U Clo Clo/blessed Non-Wrap-TCon-Value))
+(define-predicate non-wrap-tcon-value? Non-Wrap-TCon-Value)
 (define-predicate tcon-value? TCon-Value)
 
 (: rng : (All (A B) (-> (HashTable A B) (Setof B))))
@@ -155,14 +169,19 @@ Expr template:
 (define (weaken-proc fn live)
   (match fn
     [(Clo xs e ρ) (Clo xs e (weaken-env ρ live))]
+    [(? Clo/blessed? fn) (weaken-blessed fn live)]
+    [v v]))
+
+(: weaken-blessed : (-> Clo/blessed (Setof Any) Clo/blessed))
+(define (weaken-blessed fn live)
+  (match fn
     [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
      (Clo/blessed ℓ- ℓ+
                   (map (λ ([s : SContractv]) (weaken-scon s live)) Svs-)
                   (weaken-scon Sv+ live)
                   ℓ
                   (weaken-timeline η live)
-                  (weaken-proc clv live))]
-    [v v]))
+                  (weaken-proc clv live))]))
 
 (: weaken-timeline : (-> timeline (Setof Any) timeline))
 (define (weaken-timeline t live)
@@ -177,12 +196,12 @@ Expr template:
       [(? timeline? v) (weaken-timeline v live)]
       [(? Clo? v) (weaken-proc v live)]
       [(? Clo/blessed? v) (weaken-proc v live)]
-      [(call ℓ fn args) (call ℓ (rec fn) (map rec args))]
-      [(ret ℓ fn v) (ret ℓ (rec fn) (rec v))]
+      [(call ℓ fn args) (call ℓ (weaken-blessed fn live) (map rec args))]
+      [(ret ℓ fn v) (ret ℓ (weaken-blessed fn live) (rec v))]
 
       [(kl Tv) (kl (rec Tv))]
       [(¬ Tv) (¬ (rec Tv))]
-      [(bindv Tv) (bindv (rec Tv))]
+      [(bindv Tv) (bindv (weaken-proc Tv live))]
       [(∪ Tv0 Tv1) (∪ (rec Tv0) (rec Tv1))]
       [(∩ Tv0 Tv1) (∩ (rec Tv0) (rec Tv1))]
       [(· Tv0 Tv1) (· (rec Tv0) (rec Tv1))]
@@ -249,28 +268,27 @@ Expr template:
         (begink _ ρ)))
    (rng (cast ρ Env))]
 
-  [((ch*k _ Svs- _ Sv+ vs _ η clv args))
+  [((ch*k Svs- fn vs args))
    (map-union
-    (map-union (set-union (touch η) (touch clv) (scon-touch Sv+)) Svs- scon-touch)
-    args
+    (map-union
+     (map-union (touch fn) Svs- scon-touch)
+     args
+     touch)
+    vs
     touch)]
-  [((chk _ _ Sv+ clv _ η))
-   (set-union (touch clv) (touch η) (scon-touch Sv+))]
+  [((or (chret fn) (sret fn) (blret fn))) (touch fn)]
   [((chDk _ _ Dv v)) (set-union (scon-touch Dv) (touch v))]
   [((or (wrapk _ _ Sv) (mkcons Sv))) (scon-touch (cast Sv SContractv))]
 
-  [((or (sret _ v0 _ v1)
-        (blret _ v0 v1)))
-   (set-union (touch v0) (touch v1))]
-  [((blcall _ _ Sv+ clv vs* _ _ η))
+  [((blcall fn vs ev))
    (map-union
-      (set-union (touch η) (touch clv) (scon-touch Sv+))
-      vs*
-      touch)]
+    (set-union (touch fn) (touch ev))
+    vs
+    touch)]
 
-  [((or (tbin₀ _ Tv) (seqk Tv) (kbin₁ _ Tv) (consk Tv))) (touch Tv)]
-  [((seq2k T ev η _))
-   (set-union (touch T) (touch ev) (touch η))]
+  [((or (tbin₁ _ Tv) (seqk Tv) (kbin₁ _ Tv) (consk Tv))) (touch Tv)]
+  [((or (seq2k T ev η _) (tbin₀ _ T ev η _)))
+   (set-union (touch (cast T Value)) (touch (cast ev Value)) (touch (cast η Value)))]
 
   [((or (negk _ _ _ _ ρ Svs-)
         (timelinek Svs- _ _ ρ)))
@@ -325,11 +343,11 @@ Expr template:
      (values (set-union (kont-touch κ) (rng ρ)) σ)]
     [(send T ev _ η σ κ)
      (values (set-union (touch T) (touch ev) (touch η) (kont-touch κ)) σ)]
-    [(check-app _ Svs- _ Sv+ vs* _ η clv vs σ κ)
+    [(check-app Svs- fn vs* vs σ κ)
      (values
       (map-union
        (map-union
-        (map-union (set-union (touch η) (touch clv) (kont-touch κ) (scon-touch Sv+))
+        (map-union (set-union (touch fn) (kont-touch κ))
                    Svs-
                    scon-touch)
         vs*
@@ -347,8 +365,8 @@ Expr template:
     [(check ℓ+ ℓ- S v _ κ) (check ℓ+ ℓ- S v σ κ)]
     [(ev-syn S ρ _ κ) (ev-syn S ρ σ κ)]
     [(send T ev ℓ η _ κ) (send T ev ℓ η σ κ)]
-    [(check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs _ κ)
-     (check-app ℓ- Svs- ℓ+ Sv+ vs* ℓ η clv vs σ κ)]))
+    [(check-app Svs- fn vs* vs _ κ)
+     (check-app Svs- fn vs* vs σ κ)]))
 
 (: Γ : (-> State State))
 (define (Γ ς)
@@ -525,6 +543,20 @@ Expr template:
   [((∩v T₀ T₁)) (or (ν!?v T₀) (ν!?v T₁))]
   [(_) #f]) ;; ⊥ ⊤ bind pred
 
+(: whyν!?v : (-> Value Any))
+(define/match (whyν!?v T)
+  [((? ε?)) 'ε]
+  [((klv T)) `(kl ,(whyν!?v T))] ;; ε* = ε.
+  [((¬v T)) `(¬νμ ,(whyμ?v T))] ;; ¬ adds {ε}, but can't get anything else out of T.
+  [((∪v T₀ T₁)) `(∪ν ,(whyν!?v T₀) ,(whyν!?v T₁))]
+  [((·v T₀ T₁))
+   `(·ν ,(whyν!?v T₀) ,(whyν!?v T₁))]
+  [((∩v T₀ T₁))
+   (if (ν!?v T₀)
+       `(∩left ,(whyν!?v T₀) ,T₁)
+       `(∩right ,T₀ ,(whyν!?v T₁)))]
+  [(_) (error 'whyν!?v "Should never be here ~a" T)])
+
 ;; (μ? T) ⇒ ⟦T⟧ = ∅
 ;; Incomplete decision due to undecidability of infeasibility of matching.
 (: μ?v  : (-> Value Boolean))
@@ -537,17 +569,34 @@ Expr template:
   [((? ⊥?)) #t]
   [(_) #f]) ;; (or (? ε?) (? kl?) (? ¬?) (? ⊤?) (? bind?) (? bindv?) expr)
 
+(: whyμ?v : (-> Value Any))
+(define/match (whyμ?v T)
+  [((∪v T₀ T₁)) `(∪μ ,T₀ ,T₁)]
+  [((∩v T₀ T₁)) (if (μ?v T₀)
+                    `(∩left ,(whyμ?v T₀) ,T₁)
+                    `(∩right ,T₀ ,(whyμ?v T₁)))]
+  ;; denotation of · contains partial traces of T₀ regardless of T₁.
+  ;; If T₀ is denotationally {ε}, then we can say the sequence is ⊥ if T₁ is.
+  [((·v T₀ T₁)) (if (μ?v T₀)
+                    `(·left ,(whyμ?v T₀) ,T₁)
+                    `(·right ,(whyν!?v T₀)
+                             ,(whyμ?v T₁)))]
+  [((? ⊥?)) '⊥]
+  [(_) (error 'whyμ?v "Should never be here ~a" T)])
+
 ;; Theorem: DNE does not hold. However, ¬^4 = ¬^2.
 ;; We are /adding/ one ¬, so if at 3, going to 4 is going to 2.
 (: mk¬v : (-> TCon-Value TCon-Value))
 (define/match (mk¬v T)
   [((¬v (¬v (¬v T)))) (¬v (¬v T))]
+  [((? ⊥?)) -⊤] ;; ⟦¬ ⊥⟧ = ⟦⊤⟧ since no prefixes to exclude
+  [((? ⊤?)) -ε] ;; ⟦¬ ⊤⟧ = {ε} since all non-empty prefixes excluded
   [(T) (¬v T)])
 
 (: mk·v : (-> TCon-Value TCon-Value TCon-Value))
 (define (mk·v T₀ T₁)
-  (cond [(μ?v T₀) -⊥]
-        [(ν!?v T₀) T₁]
+  (cond [(μ?v T₀) -⊥] ;; Can't sequence anything past failure.
+        [(ν!?v T₀) T₁] ;; If T₀ is denotationally ε, then the sequence is just T₁.
         [else (·v T₀ T₁)]))
 
 (: mk∪v : (-> TCon-Value TCon-Value TCon-Value))
@@ -586,14 +635,10 @@ Expr template:
 (struct mkflat () #:transparent) (define -mkflat (mkflat)) ;; to make the typechecker happy
 
 ;; Checking frames
-(struct ch*k ([ℓ- : Module] [Svs- : (Listof SContractv)] [ℓ+ : Module] [Sv+ : SContractv]
+(struct ch*k ([Svs- : (Listof SContractv)] [fn : Clo/blessed]
               [vs : (Listof Value)]
-              [ℓ : Label]
-              [η : timeline]
-              [clv : Procedure-Value]
               [args : (Listof Value)]) #:transparent)
-(struct chk ([ℓ+ : Module] [ℓ- : Module] [Sv+ : SContractv] [clv : Procedure-Value]
-             [ℓ : Label] [η : timeline]) #:transparent)
+(struct chret ([fn : Clo/blessed]) #:transparent)
 (struct chDk ([ℓ+ : Module] [ℓ- : Module] [D : SContractv] [v : Value]) #:transparent)
 (struct consk ([Av : Value]) #:transparent)
 
@@ -604,14 +649,19 @@ Expr template:
 
 
 ;; Messaging frames
-(struct sret ([ℓ+ : Module] [clv : Procedure-Value] [ℓ : Label] [η : timeline]) #:transparent)
-(struct blret ([ℓ+ : Module] [η : timeline] [ev : ret]) #:transparent)
-(struct blcall ([ℓ- : Module] [ℓ+ : Module] [Sv+ : SContractv]
-                [clv : Procedure-Value] [vs* : (Listof Value)] [ℓ : Label]
-                [ev : call] [η : timeline]) #:transparent)
+(struct sret ([fn : Clo/blessed]) #:transparent)
+(struct blret ([ev : ret]) #:transparent)
+(struct blcall ([fn : Clo/blessed]
+                [vs* : (Listof Value)]
+                [ev : call]) #:transparent)
 
 ;; Deriving frames
-(struct tbin₀ ([C : (-> TCon-Value TCon-Value TCon-Value)] [T : TCon-Value]) #:transparent)
+(struct tbin₀ ([C : (-> TCon-Value TCon-Value TCon-Value)]
+               [T : TCon-Value]
+               [ev : (U call ret)]
+               [η : timeline]
+               [ℓ- : Module]) #:transparent)
+(struct tbin₁ ([C : (-> TCon-Value TCon-Value TCon-Value)] [T : TCon-Value]) #:transparent)
 (struct seq2k ([T : TCon-Value]
                [ev : (U call ret)]
                [η : timeline]
@@ -620,7 +670,10 @@ Expr template:
 ;; If (kl T) then (· ∂_E(T) (kl T))
 (struct seqk ([T : TCon-Value]) #:transparent)
 (struct tunitary ([C : (-> TCon-Value TCon-Value)]) #:transparent)
-(define negt (tunitary (λ (T) (if (ν?v T) -⊥ (mk¬v T)))))
+(define negt (tunitary (λ (T)
+                          (define nulld (ν?v T))
+                          (when nulld (printf "Null! ~a~%" (prettyfy pretty-value T)))
+                          (if nulld -⊥ (mk¬v T)))))
 
 ;; Making structural contract frames
 (struct negk ([Ss- : (Listof SContract)] [S+ : SContract] [ℓ : Label] [e : Expr] [ρ : Env] [Svs- : (Listof SContractv)]) #:transparent) ;; left of ->
@@ -635,6 +688,7 @@ Expr template:
 
 ;; Making temporal contract frames
 (struct mkt ([T : Expr] [ρ : Env]) #:transparent)
+(struct firstT ([v : timeline]) #:transparent)
 (struct kunitary ([C : (-> TCon-Value TCon-Value)]) #:transparent)
 (struct kbin₀ ([C : (-> TCon-Value TCon-Value TCon-Value)] [T : Expr] [ρ : Env]) #:transparent)
 (struct kbin₁ ([C : (-> TCon-Value TCon-Value TCon-Value)] [Tv : TCon-Value]) #:transparent)
@@ -647,17 +701,17 @@ Expr template:
 (struct pred-to-T () #:transparent) (define -pred-to-T (pred-to-T))
 (struct mk-tcon () #:transparent) (define -mk-tcon (mk-tcon))
 
-(define-type Deriv-Frame (U tunitary tbin₀ seq2k seqk))
+(define-type Deriv-Frame (U tunitary tbin₀ tbin₁ seq2k seqk))
 (define-type Check-Frame (U chDk consk))
-(define-type Ev-Frame (U evk ifk lrk begink wrapk chk
-                         clo-to-bind kunitary mkt kbin₀ kbin₁ ;; making tcons
+(define-type Ev-Frame (U evk ifk lrk begink wrapk chret
+                         clo-to-bind kunitary mkt firstT kbin₀ kbin₁ ;; making tcons
                          ))
 
 (define-type Frame (U sk arrk mkflat blcall blret flatk
                       SCon-Frame Ev-Frame Deriv-Frame Check-Frame))
 ;; Events
-(struct call ([ℓ : Label] [fn : Value] [args : (Listof Value)]) #:transparent)
-(struct ret ([ℓ : Label] [fn : Value] [v : Value]) #:transparent)
+(struct call ([ℓ : Label] [fn : Clo/blessed] [args : (Listof Value)]) #:transparent)
+(struct ret ([ℓ : Label] [fn : Clo/blessed] [v : Value]) #:transparent)
 
 (define-type Store (HashTable Any Value))
 
@@ -703,49 +757,69 @@ Expr template:
       )]
     [(hcons φ κ)
      (match φ
-       [(ch*k ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv vs-checked)
-        (check-app ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv (cons v vs-checked) σ κ)]
-       [(sret ℓ+ clv ℓ η)
-       (define ev (ret ℓ clv v))
+       [(ch*k Svs- fn vs-to-check vs-checked)
+        (check-app Svs- fn vs-to-check (cons v vs-checked) σ κ)]
+       [(sret fn)
+        (match-define (Clo/blessed ℓ- ℓ+ _ _ ℓ η _) fn)
+       (define ev (ret ℓ fn v))
        (define Tv (hash-ref σ η (λ () -⊤)))
        (if (tcon-value? Tv)
-           (send Tv ev ℓ+ η σ (lcons (blret ℓ+ η ev) κ))
+           (send Tv ev ℓ+ η σ (lcons (blret ev) κ))
            (error 'step-co "Somehow a timeline mapped to a non-tcon ~a" ς))]
        [(? checking?) (co κ v σ)])]))
+
+(: mk-ensure-tcon : (-> State Value (-> (-> TCon-Value State) State)))
+(define (mk-ensure-tcon ς v)
+  (λ (f)
+     (cond
+      [(or (Clo? v) (Clo/blessed? v)) (f (weakly v))]
+      [(non-wrap-tcon-value? v) (f v)]
+      [else (stuck ς "Expected a temporal contract value")])))
 
 (: step-cod : (-> cod State))
 (define (step-cod ς)
   (match-define (cod κ* v σ) ς)
-  (: ensure-tcon : (-> (-> TCon-Value State) State))
-  (define (ensure-tcon f)
-    (if (tcon-value? v)
-        (f v)
-        (stuck ς "Expected a temporal contract value")))
+  (define ensure-tcon (mk-ensure-tcon ς v))
   (match κ*
     [(lcons φ κ)
      (match φ
-      [(blcall ℓ- ℓ+ Sv+ clv vs* ℓ ev η)
+      [(blcall (and (Clo/blessed ℓ- ℓ+ _ Sv+ ℓ η clv) fn) vs* ev)
        ;; Temporal contract has been derived against call message.
        ;; If it's blatantly bad, then blame.
+       (define orig (hash-ref σ η (λ () -⊤)))
+       (printf "Event ~a at ~a: ~a~%"
+                     (prettyfy pretty-value ev)
+                     (prettyfy pretty-value orig)
+                     (prettyfy pretty-value v))
        (if (μ?v v)
-           (tblame ℓ- (hash-ref σ η (λ () -⊤)) ev)
+           (tblame ℓ- `((original ,orig)
+                        (justification ,(whyμ?v v))) ev)
            ;; call the function with the cleaned values, to check the positive contract afterwards.
-           (ap clv vs* (hash-set σ η v) (econs (chk ℓ+ ℓ- Sv+ clv ℓ η) κ)))]
-      [(blret ℓ+ η (and (ret _ _ rv) ev))
+           (ap clv vs* (hash-set σ η v) (econs (chret fn) κ)))]
+      [(blret ev)
+       (match-define (ret _ (Clo/blessed _ ℓ+ _ _ _ η _) rv) ev)
+       (define orig (hash-ref σ η (λ () -⊤)))
+       (printf "Event ~a at ~a: ~a~%"
+                     (prettyfy pretty-value ev)
+                     (prettyfy pretty-value orig)
+                     (prettyfy pretty-value v))
        ;; Temporal contract has been derived against return message.
        ;; If it's blatantly bad, then blame.
        (if (μ?v v)
-           (tblame ℓ+ (hash-ref σ η (λ () -⊤)) ev)
+           (tblame ℓ+ `((original ,orig)
+                        (justification (whyμ?v v))) ev)
            (co κ rv (hash-set σ η v)))])]
     [(tcons φ κ)
      (match φ ;; Derivatives of temporal contracts
        [(tunitary C) (ensure-tcon (λ (v) (cod κ (C v) σ)))]
+       ;; Computing ∂_ev(· T₀ T₁), got v = ∂_ev(T₀), and we know ¬ν(T₀)
        [(seqk T₁) (ensure-tcon (λ (v) (cod κ (mk·v v T₁) σ)))]
+       ;; Computing ∂_ev(· T₀ T₁), got v = ∂_ev(T₀), and we know ν(T₀), so also compute ∂_ev(T₁)
        [(seq2k T₁ ev η ℓ-)
-        ;; v is ∂_ev(T₀)
-        (error 'todo)
-        (send T₁ ev ℓ- η σ (tcons (tbin₀ mk∪ v) κ))]
-       [(tbin₀ C Tv) (ensure-tcon (λ (v) (cod κ (C Tv v) σ)))])]
+        ;; v is ∂_ev(T₀) and we need to compute ∂_ev(T₁) to union with v·T₁.
+        (ensure-tcon (λ (v) (send T₁ ev ℓ- η σ (tcons (tbin₁ mk∪v (mk·v v T₁)) κ))))]
+       [(tbin₀ C Tv ev η ℓ-) (ensure-tcon (λ (v) (send Tv ev ℓ- η σ (tcons (tbin₁ C v) κ))))]
+       [(tbin₁ C Tv) (ensure-tcon (λ (v) (cod κ (C Tv v) σ)))])]
     [_ (error 'step-cod "Bad TKont ~a" κ*)]))
 
 ;; States
@@ -764,9 +838,10 @@ Expr template:
 ;; Checking states
 (struct coc ([κ : CKont] [v : Value] [σ : Store]) #:transparent)
 (struct check ([ℓ+ : Module] [ℓ- : Module] [S : SContractv] [v : Value] [σ : Store] [κ : CKont]) #:transparent)
-(struct check-app ([ℓ- : Module] [Svs- : (Listof SContractv)] [ℓ+ : Module]
-                   [Sv+ : SContractv] [vs-to-check : (Listof Value)]
-                   [ℓ : Label] [η : timeline] [clv : Procedure-Value] [vs-checked : (Listof Value)]
+(struct check-app ([Svs- : (Listof SContractv)]
+                   [fn : Clo/blessed]
+                   [vs-to-check : (Listof Value)]
+                   [vs-checked : (Listof Value)]
                    [σ : Store] [κ : EKont]) #:transparent)
 
 (define-type State (U ev co check check-app ap ev-syn send cos cod coc
@@ -776,7 +851,7 @@ Expr template:
 (struct ans ([v : Value] [σ : Store]) #:transparent)
 (struct stuck ([state : State] [msg : String]) #:transparent)
 (struct blame ([ℓ : Module] [S : SContractv] [v : Value]) #:transparent)
-(struct tblame ([ℓ : Label] [T : Value] [ev : (U call ret)]) #:transparent)
+(struct tblame ([ℓ : Label] [T : Any] [ev : (U call ret)]) #:transparent)
 
 (: alloc : (-> State (U Symbol String) Any))
 (define (alloc ς tag) (gensym tag))
@@ -806,6 +881,10 @@ Expr template:
 
 (define-predicate procedure-value? Procedure-Value)
 
+(: unweaken : (-> (Listof Value) (Listof Value)))
+(define (unweaken vs)
+  (map (λ ([v : Value]) (if (weak? v) (weak-v v) v)) vs))
+
 (: ev-δ : (-> State Symbol (Listof Value) Store EKont State))
 (define (ev-δ ς which args σ κ)
   (define (arity num) (format "Primitive expected ~a args, got ~a" num (length args)))
@@ -820,73 +899,73 @@ Expr template:
     (format "Primitive expected arguments to match ~a, got ~a" preds args))
   (: go : (-> Value State))
   (define (go v) (co κ v σ))
+  (define args* (unweaken args))
+  (: f-project : (All (A) (-> (-> Any Boolean : A) (-> A Value) State)))
+  (define (f-project pred proj)
+    (if (and (pair? args*) (null? (cdr args*)))
+        (let* ([v (car (cast args* (Pairof Any Any)))])
+          (cond [(pred v) (go (proj v))]
+                [(undefined? v) (go -undefined)]
+                [else (bad (bad-preds (list pred)))]))
+        (bad (arity 1))))
   (match which
-    ['cons (or (arity-mismatch 2) (go (cons (first args) (second args))))]
-    ['not (or (arity-mismatch 1) (go (not (first args))))]
+    ['cons (or (arity-mismatch 2) (go (cons (first args*) (second args*))))]
+    ['not (or (arity-mismatch 1) (go (not (first args*))))]
     ['display
-     (display "Display: ") (for-each display args) (newline)
+     (display "Display: ") (for-each display args*) (newline)
      (go (void))]
     ['pair? (or (arity-mismatch 1)
-                (go (pair? (first args))))]
-    ['car (if (and (pair? args) (null? (cdr args)) (pair? (car args)))
-              (go (car (car args)))
+                (go (pair? (first args*))))]
+    ['car (if (and (pair? args*) (null? (cdr args*)) (pair? (car args*)))
+              (go (car (car args*)))
               (bad (bad-preds (list pair?))))]
-    ['cdr (if (and (pair? args) (null? (cdr args)) (pair? (car args)))
-              (go (cdr (car args)))
+    ['cdr (if (and (pair? args*) (null? (cdr args*)) (pair? (car args*)))
+              (go (cdr (car args*)))
               (bad (bad-preds (list pair?))))]
     ['null? (or (arity-mismatch 1)
-                (go (null? (first args))))]
+                (go (null? (first args*))))]
     ['new-timeline (or (arity-mismatch 0)
                        (go (timeline (alloc ς 'new-timeline))))]
 
     ['call? (or (arity-mismatch 1)
-                (go (call? (first args))))]
-    ['call-label (if (and (pair? args) (null? (cdr args)) (call? (car args)))
-                     (go (call-ℓ (car args)))
-                     (bad (bad-preds (list call?))))]
-    ['call-fn (if (and (pair? args) (null? (cdr args)) (call? (car args)))
-                  (go (call-fn (car args)))
-                  (bad (bad-preds (list call?))))]
-    ['call-args (if (and (pair? args) (null? (cdr args)) (call? (car args)))
-                    (go (call-args (car args)))
-                    (bad (bad-preds (list call?))))]
+                (go (call? (first args*))))]
+    ['call-label (f-project call? call-ℓ)]
+    ['call-fn (f-project call? call-fn)]
+    ['call-args (f-project call? call-args)]
 
-    ['ret? (or (arity-mismatch 1) (go (ret? (first args))))]
-    ['ret-fn (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
-                 (go (ret-fn (car args)))
-                 (bad (bad-preds (list ret?))))]
-    ['ret-label (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
-                     (go (ret-ℓ (car args)))
-                     (bad (bad-preds (list ret?))))]
-    ['ret-value (if (and (pair? args) (null? (cdr args)) (ret? (car args)))
-                     (go (ret-v (car args)))
-                     (bad (bad-preds (list ret?))))]
+    ['ret? (or (arity-mismatch 1)
+               (go (ret? (first args*))))]
+    ['ret-fn (f-project ret? ret-fn)]
+    ['ret-label (f-project ret? ret-ℓ)]
+    ['ret-value (f-project ret? ret-v)]
 
-    ['boolean? (or (arity-mismatch 1) (go (boolean? (first args))))]
-    ['number? (or (arity-mismatch 1) (go (number? (first args))))]
-    ['real? (or (arity-mismatch 1) (go (real? (first args))))]
+    ['boolean? (or (arity-mismatch 1) (go (boolean? (first args*))))]
+    ['number? (or (arity-mismatch 1) (go (number? (first args*))))]
+    ['real? (or (arity-mismatch 1) (go (real? (first args*))))]
 
-    ['box? (or (arity-mismatch 1) (go (boxv? (first args))))]
+    ['box? (or (arity-mismatch 1) (go (boxv? (first args*))))]
     ['make-box (or (arity-mismatch 1)
                    (let ([a (alloc ς 'make-box)])
-                     (co κ (boxv a) (hash-set σ a (first args)))))]
+                     (co κ (boxv a) (hash-set σ a (first args*)))))]
     ['unbox (or (arity-mismatch 1)
-                (match (first args)
+                (match (first args*)
                   [(boxv a) (go (hash-ref σ a))]
+                  [(? undefined?) (go -undefined)]
                   [f (bad (format "unbox expects a box, got ~a" f))]))]
-    ['set-box! (match args
+    ['set-box! (match args*
                  [(list b v)
                   (match b
+                    [(? undefined?) (co κ (void) σ)]
                     [(boxv a) (co κ (void) (hash-set σ a v))]
                     [_ (bad (format "set-box! expects a box as the first argument, got ~a" b))])]
                  [_ (bad (arity 2))])]
 
-    ['<= (if (pair? args)
-             (let ([d (cdr args)])
+    ['<= (if (pair? args*)
+             (let ([d (cdr args*)])
                (if (pair? d)
                    (let ([dd (cdr d)])
                      (if (null? dd)
-                         (let ([a (car args)]
+                         (let ([a (car args*)]
                                [ad (car d)])
                            (if (and (real? a) (real? ad))
                                (go (<= a ad))
@@ -896,7 +975,16 @@ Expr template:
              (bad (arity 2)))]
 
     ['equal? (or (arity-mismatch 2)
-                 (go (value-equal? (first args) (second args) σ)))]))
+                 (let* ([v0 (first args*)]
+                        [v1 (second args*)]
+                        [ans (and (not (or (undefined? v0) (undefined? v1)))
+                                  (value-equal? v0 v1 σ))])
+                   (printf "Checking equality of ~a, ~a: ~a~%"
+                           (prettyfy pretty-value v0)
+                           (prettyfy pretty-value v1)
+                           ans)                   
+                   ;; Like NaN, undefined is not equal to itself
+                   (go ans)))]))
 
 (: restrict-to-fv : (-> Expr Env Env))
 (define (restrict-to-fv e ρ)
@@ -911,7 +999,11 @@ Expr template:
    (match e
      [(app e0 es) (ev e0 ρ σ (econs (evk es '() ρ) κ))]
      [(lam xs e) (co κ (Clo xs e (restrict-to-fv e ρ)) σ)]
-     [(ref x) (co κ (hash-ref σ (hash-ref ρ x)) σ)]
+     [(ref x)
+      (define a/undefined (hash-ref ρ x))
+      (if (undefined? a/undefined)
+          (co κ a/undefined σ)
+          (co κ (hash-ref σ a/undefined) σ))]
      [(smon + - Ssyn e) (ev-syn Ssyn ρ σ (bcons (sk + - e ρ) κ))]
      [(tmon ηe T) (ev ηe ρ σ (econs (mkt T ρ) κ))]
      [(ife gu th el) (ev gu ρ σ (econs (ifk th el ρ) κ))]
@@ -944,14 +1036,20 @@ Expr template:
      [(∩ T₀ T₁) (ev T₀ ρ σ (econs (kbin₀ mk∩v T₁ ρ) κ))]
      [_ (error 'step-ev "Bad expression ~a" e)])])
 
+(: singleton-lst? : (-> (Listof Any) Boolean))
+(define (singleton-lst? xs) (and (pair? xs) (null? (cdr xs))))
+
+(: unary? : (-> Value Boolean))
+(define (unary? v)
+  (cond [(Clo? v) (singleton-lst? (Clo-xs v))]
+        [(Clo/blessed? v) (singleton-lst? (Clo/blessed-Svs- v))]
+        ;; primops can't produce temporal contracts, so reject.
+        [else #f]))
+
 (: step-co : (-> co State))
 (define (step-co ς)
   (match-define (co κ* v σ) ς)
-  (: ensure-tcon : (-> (-> TCon-Value State) State))
-  (define (ensure-tcon f)
-    (if (tcon-value? v)
-        (f v)
-        (stuck ς "Expected a temporal contract value")))
+  (define ensure-tcon (mk-ensure-tcon ς v))
   (match κ*
    ['() (ans v σ)]
    [(acons φ κ) ;; co --> cos
@@ -996,11 +1094,25 @@ Expr template:
 
       ;; Constructing temporal contracts
       [(clo-to-bind)
-       (match v
-         [(? weakly?) (co κ v σ)]
-         [_ (co κ (weakly v) σ)]
-         [_ (stuck ς "Bind expects a unary function")])]
-      [(mkt T ρ) (ev T ρ σ κ)]
+       (define (bad) (stuck ς "Bind expects a unary function"))
+       (cond [(or (Clo? v) (Clo/blessed? v))
+              (if (unary? v)
+                  (co κ (bindv (weakly v)) σ)
+                  (bad))]
+             [(weakly? v)
+              (if (unary? (weakly-v v))
+                  (co κ (bindv v) σ)
+                  (bad))]
+             [else (bad)])]
+      [(mkt T ρ)
+       (if (timeline? v)
+           (ev T ρ σ (econs (firstT v) κ))
+           (stuck ς "tmon expects a timeline object"))]
+      [(firstT η) (ensure-tcon (λ (v)
+                                  (printf "Initial ~a: ~a~%"
+                                          (prettyfy pretty-value η)
+                                          (prettyfy pretty-value v))
+                                  (co κ (void) (hash-set σ η v))))]
       [(kunitary C) (ensure-tcon (λ (v) (co κ (C v) σ)))]
       [(kbin₀ C T ρ) (ensure-tcon (λ (v) (ev T ρ σ (econs (kbin₁ C v) κ))))]
       [(kbin₁ C Tv) (ensure-tcon (λ (v) (co κ (C Tv v) σ)))]
@@ -1012,9 +1124,9 @@ Expr template:
          [(cons e es) (ev e ρ σ (econs (begink es ρ) κ))])]
 
       ;; Messaging
-      [(chk ℓ+ ℓ- Sv+ clv ℓ η)
+      [(chret (and (Clo/blessed ℓ- ℓ+ _ Sv+ _ η _) fn))
        ;; check return value first, then send message to timeline.
-       (check ℓ+ ℓ- Sv+ v σ (hcons (sret ℓ+ clv ℓ η) κ))] ;; blame or do call
+       (check ℓ+ ℓ- Sv+ v σ (hcons (sret fn) κ))] ;; blame or do call
 
       ;; Constructing the whole smon contract requires checking upfront.
       [(wrapk ℓ+ ℓ- Sv)
@@ -1062,7 +1174,7 @@ Expr template:
      (match fn
        [(Clo xs e ρ) (app xs e ρ vs)]
        [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
-        (check-app ℓ- Svs- ℓ+ Sv+ vs ℓ η clv '() σ κ)]
+        (check-app Svs- fn vs '() σ κ)]
        [(primop which) (ev-δ ς which vs σ κ)]))
    (match fn
      [(weakly clv) (wrap clv (map weak vs))]
@@ -1102,28 +1214,26 @@ Expr template:
      [(klv T*) (send T* ev ℓ- η σ (tcons (seqk T) κ))]
      [(¬v T*) (send T* ev ℓ- η σ (tcons negt κ))]
      [(·v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (if (ν?v T₀) (seq2k T₁ ev η ℓ-) (seqk T₁)) κ))]
-     [(∪v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∪v T₁) κ))]
-     [(∩v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∩v T₁) κ))]
+     [(∪v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∪v T₁ ev η ℓ-) κ))]
+     [(∩v T₀ T₁) (send T₀ ev ℓ- η σ (tcons (tbin₀ mk∩v T₁ ev η ℓ-) κ))]
      [(? procedure-value? v) (ap v (list ev) σ (pcons -pred-to-T κ))]
      [_ (error 'step-send "Unhandled temporal contract ~a" T)])])
 
 (: step-check-app : (-> check-app State))
 (define/match (step-check-app ς)
-  [((check-app ℓ- Svs- ℓ+ Sv+ vs-to-check ℓ η clv vs-checked σ κ))
+  [((check-app Svs- fn vs-to-check vs-checked σ κ))
    (match* (Svs- vs-to-check)
      [('() '())
+      (match-define (Clo/blessed ℓ- ℓ+ _ Sv+ ℓ η clv) fn)
       (define args-checked (reverse vs-checked))
-      (define ev (call ℓ clv args-checked))
+      (define ev (call ℓ fn args-checked))
       (define Tv (hash-ref σ η (λ () -⊤)))
       (if (tcon-value? Tv)
-          (send Tv
-                ev
-                ℓ-
-                η σ
-                (lcons (blcall ℓ- ℓ+ Sv+ clv args-checked ℓ ev η) κ))
+          (send Tv ev ℓ- η σ (lcons (blcall fn args-checked ev) κ))
           (error 'step-check-app "Somehow timeline maps to non-tcon-value ~a" ς))]
      [((cons Sv- Svs-*) (cons v1 vs-to-check*))
-      (check ℓ- ℓ+ Sv- v1 σ (hcons (ch*k ℓ- Svs-* ℓ+ Sv+ vs-to-check* ℓ η clv vs-checked) κ))]
+      (match-define (Clo/blessed ℓ- ℓ+ _ _ _ _ _) fn)
+      (check ℓ- ℓ+ Sv- v1 σ (hcons (ch*k Svs-* fn vs-to-check* vs-checked) κ))]
      [(_ _) (stuck ς "Arity mismatch for blessed application")])])
 
 (: step-check : (-> check State))
@@ -1164,6 +1274,17 @@ Expr template:
   (if (or (ans? ς) (blame? ς) (tblame? ς) (stuck? ς))
       ς
       (run (step ς))))
+#|
+(: symbol-append-number : (-> Symbol Exact-Nonnegative-Integer Symbol))
+(define (symbol-append-number s n)
+  (string->symbol (string-append (symbol->string s) (number->string n))))
+
+(: fresh : (->* (Symbol (Setof Symbol)) (Exact-Nonnegative-Integer) Symbol))
+(define (fresh base not-in [tail 0])
+  (if (set-member? not-in base)
+      (fresh (symbol-append-number base tail) not-in (add1 tail))
+      base))
+|#
 
 (define-type Renaming (HashTable Symbol Symbol))
 (: parse : (->* (Any) [Renaming] Expr))
@@ -1354,6 +1475,108 @@ Expr template:
          -any/c)]
     [e (parse e ρ)]))
 
+(: unparse : (-> Expr Any))
+(define (unparse e)
+  (match e
+    [(app e es) (cons (unparse e) (map unparse es))]
+    [(ref x) x]
+    [(lam xs e) `(λ ,xs ,(unparse e))]
+    [(smon + - S e) `(smon ,+ ,- ,(unparse-scon S) ,(unparse e))]
+    [(tmon ηe T) `(tmon ,(unparse ηe) ,(unparse T))]
+    [(ife g t e) `(if ,(unparse g) ,(unparse t) ,(unparse e))]
+    [(letrece cs e) `(letrec ,(map (λ ([c : (List Symbol Expr)])
+                                      (list (car c) (unparse (cadr c))))
+                                   cs)
+                       ,(unparse e))]
+    [(begine es) `(begin . ,(map unparse es))]
+    [(primop which) which]
+    [(? datum?) e]
+    
+    [(? ∩? T) `(∩ . ,(map unparse (flatten-pair ∩? ∩-T₀ ∩-T₁ T)))]
+    [(? ∪? T) `(∪ . ,(map unparse (flatten-pair ∪? ∪-T₀ ∪-T₁ T)))]
+    [(? ·? T) `(· . ,(map unparse (flatten-pair ·? ·-T₀ ·-T₁ T)))]
+    [(¬ T) `(¬ ,(unparse T))]
+    [(kl T) `(* ,(unparse T))]
+    [(bind e) `(bind ,(unparse e))]
+    [(ε) 'ε]
+    [(⊤) '...]
+    [(⊥) '⊥]
+
+    [_ (error 'unparse "Bad expression ~a" e)]))
+
+(: unparse-scon : (-> SContract Any))
+(define (unparse-scon S)
+  (match S
+    [(--> Ss- S+ ℓ e)
+     `(--> ,(map unparse-scon Ss-) ,(unparse-scon S+) ,ℓ ,(unparse e))]
+    [(cons/c A D) `(cons/c ,(unparse-scon A) ,(unparse-scon D))]
+    [(? any/c?) `any/c]
+    [_ (error 'unparse-scon "Bad structural contract ~a" S)]))
+
+(: prettyfy : (All (A) (-> (-> A Any) A String)))
+(define (prettyfy f v) (with-output-to-string (λ () (pretty-write (f v)))))
+
+(: pretty-env : (-> Env Any))
+(define (pretty-env ρ)
+  (for/list : (Listof Any) ([(x a) (in-hash ρ)])
+    (list x '↦ a)))
+
+(: flatten-pair : (All (A B) (-> (-> Any Boolean : A)
+                               (-> A B)
+                               (-> A B)
+                               B
+                               (Listof B))))
+(define (flatten-pair p π₀ π₁ v)
+  (let rec : (Listof B) ([v : B v])
+       (cond [(p v) (append (rec (π₀ v)) (rec (π₁ v)))]
+             [else (list v)])))
+
+(: pretty-value : (-> Value Any))
+(define (pretty-value v)
+  (match v
+   [(Clo xs e ρ)
+    (if (= 0 (hash-count ρ))
+        `(top-fun ,(unparse (lam xs e)))
+        `(closure ,(unparse (lam xs e)) ,(pretty-env ρ)))]
+   [(timeline a) `(timeline ,a)]
+   [(boxv a) `(box @ ,a)]
+   [(Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η clv)
+    `(blessed (- ,ℓ-) (+ ,ℓ+)
+              ,(pretty-sconv (-->/blessed Svs- Sv+ ℓ η))
+              ,(pretty-value clv))]
+   [(cons A D) (cons (pretty-value A) (pretty-value D))]
+
+   [(call ℓ fn args) `(call ,ℓ ,(pretty-value fn) ,(map pretty-value args))]
+   [(ret ℓ fn v) `(ret ,ℓ ,(pretty-value fn) ,(pretty-value v))]
+
+   [(klv Tv) `(* ,(pretty-value Tv))]
+   [(¬v Tv) `(¬ ,(pretty-value Tv))]
+   [(bindv Tv) `(bind ,(pretty-value Tv))]
+   [(? ∪v? Tv)
+    `(∪ . ,(map pretty-value (flatten-pair ∪v? ∪v-T₀ ∪v-T₁ Tv)))]
+   [(? ∩v? Tv)
+    `(∩ . ,(map pretty-value (flatten-pair ∩v? ∩v-T₀ ∩v-T₁ Tv)))]
+   [(? ·v? Tv)
+    `(· . ,(map pretty-value (flatten-pair ·v? ·v-T₀ ·v-T₁ Tv)))]
+
+   [(primop which) which]
+   [(weak v) `(weak ,(pretty-value v))]
+   [(weakly v) `(weakly ,(pretty-value v))]
+
+   [(⊤) '...]
+   [(⊥) '⊥]
+   [(ε) 'ε]
+
+   [_ v]))
+
+(: pretty-sconv : (-> SContractv Any))
+(define/match (pretty-sconv Sv)
+  [((-->/blessed Svs- Sv+ ℓ η))
+   `(-->/blessed ,(map pretty-sconv Svs-) ,(pretty-sconv Sv+) ,ℓ ,(pretty-value η))]
+  [((cons/blessed Av Dv)) `(cons/c ,(pretty-sconv Av) ,(pretty-sconv Dv))]
+  [((? any/c?)) 'any/c]
+  [(v) (pretty-value (cast v Value))])
+
 (: rassoc : (All (A) (-> (-> A A A) A (Listof A) A)))
 (define (rassoc bin ⊥ lst)
   (match lst
@@ -1363,61 +1586,92 @@ Expr template:
          (bin x (rassoc bin ⊥ y)))]
     ['() ⊥]))
 
+(define ex-common
+  '((define narf (make-box #f))
+    (define (insert cmp)
+      (λ (a lst)
+         (set-box! narf cmp)
+         (cond [(null? lst) (cons a '())]
+               [else
+                (define l0 (car lst))
+                (if (cmp a l0)
+                    (cons a lst)
+                    (cons l0 ((insert cmp) a (cdr lst))))])))
+    (define (foldl f b lst)
+      (if (pair? lst)
+          (foldl f (f (car lst) b) (cdr lst))
+          b))
+    (define (sort cmp lst)
+      (foldl (insert cmp) '() lst))
+    (define (listof f)
+      (λ (lst)
+         (if (pair? lst)
+             (and (f (car lst)) ((listof f) (cdr lst)))
+             (null? lst))))
+    (define η (new-timeline))
+    (define csort
+      (smon 'user 'context
+            (->
+             (-> real? real? boolean? : 'cmp @ η)
+             (listof real?)
+             any
+             : 'sort @ η)
+            sort))
+    (define lst (cons 1 (cons 2 (cons 3 (cons 4 '())))))
+    (define call-sort
+      (λ (ev) (and (call? ev) (equal? 'sort (call-label ev)))))
+    (define ret-sort
+      (λ (ev) (and (ret? ev) (equal? 'sort (ret-label ev)))))
+    (define not-ret-sort (λ (ev) (not (ret-sort ev))))
+    (csort (λ (x y) (<= x y)) lst)))
+
 (define example
-  '(let ()
-     (define narf (make-box #f))
-     (define (insert cmp)
-       (λ (a lst)
-          (set-box! narf cmp)
-          (cond [(null? lst) (cons a '())]
-                [else
-                 (define l0 (car lst))
-                 (if (cmp a l0)
-                     (cons a lst)
-                     (cons l0 ((insert cmp) a (cdr lst))))])))
-     (define (foldl f b lst)
-       (if (pair? lst)
-           (foldl f (f (car lst) b) (cdr lst))
-           b))
-     (define (sort cmp lst)
-       (foldl (insert cmp) '() lst))
-     (define (listof f)
-       (λ (lst)
-          (if (pair? lst)
-              (and (f (car lst)) ((listof f) (cdr lst)))
-              (null? lst))))
-     (define η (new-timeline))
-     (define csort
-       (smon 'user 'context
-             (->
-              (-> real? real? boolean? : 'cmp @ η)
-              (listof real?)
-              any
-              : 'sort @ η)
-             sort))
-     (define lst (cons 1 (cons 2 (cons 3 (cons 4 '())))))
-     (display csort)
-     (csort (λ (x y) (display x) (<= x y)) lst)
+  `(let ()
+     ,@ex-common
      (begin
        (tmon η
             (∩ (¬ (· ...
-                     (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))
-                     (* (λ (ev) (or (not (ret? ev))
-                                    (not (equal? 'sort (ret-label ev))))))
-                     (λ (ev) (and (call? ev) (equal? 'sort (call-label ev))))))
+                     ;; (call 'sort _)
+                     call-sort
+                     ;; (* (! (ret 'sort _)))
+                     (* not-ret-sort)
+                     ;; (call 'sort)
+                     call-sort))
 
                (¬ (· ...
                      (bind
                       (λ (ev)
-                         (if (and (call? ev)
-                                  (equal? 'sort (call-label ev)))
+                         (if (call-sort ev)
                              (·  ...
-                                 (λ (ev) (and (ret? ev) (equal? 'sort (ret-label ev))))
+                                 ret-sort
                                  ...
                                  (λ (ev*) (and (call? ev*) (equal? (car (call-args ev))
                                                                    (call-fn ev*)))))
                              ⊥)))))))
        (csort (λ (x y) (<= x y)) lst))))
+(define ex-bad
+  `(let ()
+     ,@ex-common
+     (tmon η
+           (∩ (¬ (· (* (λ (ev) (not (call-sort ev))))
+                    call-sort
+                    (* not-ret-sort)
+                    call-sort))
+              (¬ (· (* (λ (ev) (not (call-sort ev))))
+                    (bind
+                     (λ (ev)
+                        (if (call-sort ev)
+                            (· (* not-ret-sort)
+                               ret-sort
+                               (* (λ (ev*) (not (and (call? ev*)
+                                                     (equal? (car (call-args ev))
+                                                             (call-fn ev*))))))
+                               (λ (ev*) (and (call? ev*)
+                                             (equal? (car (call-args ev))
+                                                     (call-fn ev*)))))
+                            ⊥)))))))
+     (csort (λ (x y) (<= x y)) lst)
+     ((unbox narf) 0 1)))
 
 (define expr (parse example))
 (unless (set-empty? (fv expr))
