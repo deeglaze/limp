@@ -9,7 +9,8 @@
          external-spaces               ;; Map[Name,ED]
          user-spaces                   ;; Mutable-Map[Name,Type]
          ordered-us ;; List[Pair[Name,Type]]
-         E<: ;; Set[(U Pair[Name,τ] Pair[τ, Name])]
+         ordered-es
+         E<: ;; Set[Pair[τ, Name]]
          meta-table ;; if #:check-metavariables is given, names include a space check.
          uspace-info) ;; Mutable-Map[Name,Vector[Bool, Bool, ℕ]]
         #:prefab)
@@ -23,10 +24,11 @@
             (Metafunction-τ m))))
 
 ;; External descriptor
-(struct ED (⊔ ⊑ ≡ μ touch quality pretty parse))
+(struct ED (⊔ ⊑ ≡ μ touch quality pretty syntax?))
 
 (define (flat-ED q p)
   (ED #'flat-⊔ #'flat-⊑ #'flat-≡ #'flat-card #'flat-touch q #'flat-pretty p))
+(define bool-ED (flat-ED 'concrete (λ (stx) (boolean? (syntax-e stx)))))
 
 (define limp-externalize-default #t)
 (define limp-default-mm 'delay)
@@ -42,7 +44,7 @@
           'check-casts #t))
 
 (define L₀
-  (Language defaults ⊥ (make-hash) '() ∅ ⊥ (make-hash)))
+  (Language defaults ⊥ (make-hash) '() '() ∅ ⊥ (make-hash)))
 (define current-language (make-parameter L₀))
 (define check-for-heapification? (make-parameter #f))
 

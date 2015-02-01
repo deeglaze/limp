@@ -37,7 +37,7 @@ and semantics.
   (let rec ([p p])
     (define sexp
       (match p
-        [(PAnd _ _ (? list? ps)) `(and . ,(map rec ps))]
+        [(PAnd _ _ (? list? ps)) `(#:and . ,(map rec ps))]
         [(PName _ _ x) x]
         [(PWild _ _) '_]
         [(PVariant _ _ n (? list? ps)) `(,n . ,(map rec ps))]
@@ -245,6 +245,7 @@ term template
          `(#:alloc ,@(do-tag tag) ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
         [(EMatch _ _ de rules) `(#:match ,(rec de) . ,(map (rule->sexp #f) rules))]
+        [(EIf _ _ g t e) `(#:if ,(rec g) ,(rec t) ,(rec e))]
         [(EExtend _ _ m tag k v)
          `(#:extend ,(rec m) ,@(do-tag tag) ,(rec k) ,(rec v))]
         [(EEmpty-Map _ _) '#:empty-map]
@@ -259,6 +260,7 @@ term template
         [(EMap-remove _ _ m k) `(#:map-remove ,(rec m) ,(rec k))]
         [(EHeapify _ _ e taddr tag) `(#:addrize ,(rec e) ,taddr ,@(do-tag tag))]
         [(EUnquote _ _ e) `(#:unquote ,e)]
+        [(EExternal _ (Check t) e) `(#:external ,t ,e)]
         [_ `(error$ ,(format "Unrecognized expression form: ~a" e))]))
     (case v
       [(0) sexp]
@@ -275,6 +277,7 @@ term template
     [(EAlloc sy _ tag) (EAlloc sy ct tag)]
     [(ELet sy _ bus body) (ELet sy ct bus body)]
     [(EMatch sy _ de rules) (EMatch sy ct de rules)]
+    [(EIf sy _ g t e) (EIf sy g t e)]
     [(EExtend sy _ m tag k v) (EExtend sy ct m tag k v)]
     [(EEmpty-Map sy _) (EEmpty-Map sy ct)]
     [(EEmpty-Set sy _) (EEmpty-Set sy ct)]
@@ -288,6 +291,7 @@ term template
     [(EMap-remove sy _ m k) (EMap-remove sy ct m k)]
     [(EHeapify sy _ e taddr tag) (EHeapify sy ct e taddr tag)]
     [(EUnquote sy _ e) (EUnquote sy ct e)]
+    [(EExternal sy _ v) (EExternal sy ct v)]
     [_ (error 'expr-replace-ct "Unrecognized expression form: ~a" e)]))
 
 (define (write-expr e port mode)
@@ -308,6 +312,7 @@ term template
 (struct EAlloc Expression (tag) #:transparent) ;; space mm em in type
 (struct ELet Expression (bus body) #:transparent)
 (struct EMatch Expression (discriminant rules) #:transparent)
+(struct EIf Expression (g t e) #:transparent)
 (struct EExtend Expression (m tag k v) #:transparent)
 (struct EEmpty-Map Expression () #:transparent)
 (struct EEmpty-Set Expression () #:transparent)
@@ -322,6 +327,7 @@ term template
 (struct EMap-has-key Expression (m k) #:transparent)
 (struct EMap-remove Expression (m k) #:transparent)
 (struct EUnquote Expression (e) #:transparent)
+(struct EExternal Expression (v) #:transparent)
 ;; For heap-allocation annotations and algebraic eliminations
 (struct EHeapify Expression (e taddr tag) #:transparent)
 (struct implicit-tag (tag) #:prefab)
@@ -335,6 +341,7 @@ expr template
     [(EAlloc sy ct tag) ???]
     [(ELet sy ct bus body) ???]
     [(EMatch sy ct de rules) ???]
+    [(EIf sy ct g t e) ???]
     [(EExtend sy ct m tag k v) ???]
     [(EEmpty-Map sy ct) ???]
     [(EEmpty-Set sy ct) ???]
@@ -348,6 +355,7 @@ expr template
     [(EMap-remove sy ct m k) ???]
     [(EHeapify sy ct m taddr tag) ???]
     [(EUnquote sy ct e) ???]
+    [(EExternal sy ct v) ???]
     [_ (error who "Unrecognized expression form: ~a" e)])
 |#
 
@@ -381,6 +389,10 @@ expr template
           (for/and ([rule0 (in-list rules0)]
                     [rule1 (in-list rules1)])
             (rule-α-equal? rule0 rule1 ρ0 ρ1)))]
+    [((EIf _ ct g0 t0 e0) (EIf _ ct g1 t1 e1))
+     (and (expr-α-equal? g0 g1 ρ0 ρ1)
+          (expr-α-equal? t0 t1 ρ0 ρ1)
+          (expr-α-equal? e0 e1 ρ0 ρ1))]
     [((EExtend _ ct m0 tag k0 v0) (EExtend _ ct m1 tag k1 v1))
      (and (expr-α-equal? m0 m1 ρ0 ρ1)
           (expr-α-equal? k0 k1 ρ0 ρ1)
@@ -413,6 +425,7 @@ expr template
     [((EHeapify _ ct e0 taddr tag) (EHeapify _ ct e1 taddr tag))
      (expr-α-equal? e0 e1 ρ0 ρ1)]
     [((EUnquote _ ct e) (EUnquote _ ct e)) #t]
+    [((EExternal _ ct v) (EExternal _ ct v)) #t]
     [(_ _) #f]))
 
 ;; Binding updates
@@ -420,6 +433,8 @@ expr template
   (match bu
     [(Update _ k v) `(#:update ,(expr->sexp k) ,(expr->sexp v))]
     [(Where _ pat e) `(#:where ,(pattern->sexp pat) ,(expr->sexp e))]
+    [(When _ e) `(#:when ,(expr->sexp e))]
+    [(Unless _ e) `(#:unless ,(expr->sexp e))]
     [_ `(error$ ,(format "Unrecognized bu form: ~a" bu))]))
 
 (define (bu-α-equal? bu0 bu1 ρ0 ρ1)
@@ -431,6 +446,8 @@ expr template
      (if (expr-α-equal? e0 e1 ρ0 ρ1)
          (pattern-α-equal? pat0 pat1 ρ0 ρ1)
          (values ρ0 ρ1 #f))]
+    [((When _ e0) (When _ e1)) (expr-α-equal? e0 e1)]
+    [((Unless _ e0) (Unless _ e1)) (expr-α-equal? e0 e1)]
     [(_ _) (values ρ0 ρ1 #f)]))
 
 (define (bus-α-equal? bus0 bus1 ρ0 ρ1)
@@ -450,6 +467,10 @@ expr template
 (struct Update BU (k v) #:transparent
         #:methods gen:custom-write [(define write-proc write-bu)])
 (struct Where BU (pat e) #:transparent
+        #:methods gen:custom-write [(define write-proc write-bu)])
+(struct When BU (e) #:transparent
+        #:methods gen:custom-write [(define write-proc write-bu)])
+(struct Unless BU (e) #:transparent
         #:methods gen:custom-write [(define write-proc write-bu)])
 
 (define (rule->sexp arrow?)
@@ -530,7 +551,9 @@ expr template
     [(Where sy pat e)
      (Where sy
             (abstract-frees-in-pattern pat names)
-            (abstract-frees-in-expr e names))]))
+            (abstract-frees-in-expr e names))]
+    [(When sy e) (When sy (abstract-frees-in-expr e names))]
+    [(Unless sy e) (Unless sy (abstract-frees-in-expr e names))]))
 
 (define (open-scopes-in-bu bu substs)
   (match bu
@@ -541,7 +564,9 @@ expr template
     [(Where sy pat e)
      (Where sy
             (open-scopes-in-pattern pat substs)
-            (open-scopes-in-expr e substs))]))
+            (open-scopes-in-expr e substs))]
+    [(When sy e) (When sy (open-scopes-in-expr e substs))]
+    [(Unless sy e) (Unless sy (open-scopes-in-expr e substs))]))
 
 (define (abstract-frees-in-ct ct names)
   (match ct
@@ -591,7 +616,7 @@ expr template
       [(PMap-with* sy _ k v p) (PMap-with* sy ct* (self k) (self v) (self p))]
       [(PSet-with sy _ v p) (PSet-with sy ct* (self v) (self p))]
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
-      [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t names))]
+      [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t substs))]
       [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
       [(PIsExternal sy _) (PIsExternal sy ct*)]
       [(PIsAddr sy _) (PIsAddr sy ct*)]
@@ -632,6 +657,7 @@ expr template
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
       [(ELet sy _ bus body) (ELet sy ct* (abstract-frees-in-bus bus names) (self body))]
       [(EMatch sy _ de rules) (EMatch sy ct* (self de) (abstract-frees-in-rules-aux rules names))]
+      [(EIf sy _ g t e) (EIf sy ct* (self g) (self t) (self e))]
       [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
       [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
       [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
@@ -645,6 +671,7 @@ expr template
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
       [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
       [(EUnquote sy _ racke) (EUnquote sy ct* racke)]
+      [(EExternal sy _ v) (EExternal sy ct* v)]
       [_ (error 'abstract-frees-in-expr "Unrecognized expression form: ~a" e)])))
 
 (define (open-scopes-in-expr e substs)
@@ -656,12 +683,13 @@ expr template
               (and τs (open-scopess τs substs))
               (map self es))]
       [(EVariant sy _ n tag τs es)
-       (EVariant sy ct* n tag (and τs (open-scopess τs names)) (map self es))]
+       (EVariant sy ct* n tag (and τs (open-scopess τs substs)) (map self es))]
       [(ERef sy _ x) (ERef sy ct* x)]
       [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
-      [(ELet sy _ bus body) (ELet sy ct* (open-scopes-in-bus bus names) (self body))]
-      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (open-scopes-in-rules-aux rules names))]
+      [(ELet sy _ bus body) (ELet sy ct* (open-scopes-in-bus bus substs) (self body))]
+      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (open-scopes-in-rules-aux rules substs))]
+      [(EIf sy _ g t e) (EIf sy ct* (self g) (self t) (self e))]
       [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
       [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
       [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
@@ -675,6 +703,7 @@ expr template
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
       [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
       [(EUnquote sy _ racke) (EUnquote sy ct* racke)]
+      [(EExternal sy _ v) (EExternal sy ct* v)]
       [_ (error 'open-scopes-in-expr "Unrecognized expression form: ~a" e)])))
 
 (define (abstract-frees-in-term t names)

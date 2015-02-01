@@ -63,7 +63,7 @@ Example:
                           ;; Recursive positions are safe.
                           (open-scope st T⊥)))]
                 [(TΛ: _ x st) #f] ;; XXX: Must be instantiated to be a problem?
-                [(or (TSUnion: _ ts) (TRUnion: _ ts)) (ormap rec ts)]
+                [(TUnion: _ ts) (ormap rec ts)]
                 [(? THeap?) #f] ;; Gets heapified and removes possible recursion here.
                 [(? needs-resolve?) (rec (resolve t))]
                 ;; names are introduced by a μ, and trusted if the name is not a symbol

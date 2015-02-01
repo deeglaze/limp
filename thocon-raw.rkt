@@ -23,6 +23,15 @@
   (for/fold ([S : (Setof B) base]) ([x (in-list lst)])
     (set-union S (f x))))
 
+(: rassoc : (All (A) (-> (-> A A A) A (Listof A) A)))
+(define (rassoc bin ⊥ lst)
+  (match lst
+    [(cons x y)
+     (if (null? y)
+         x
+         (bin x (rassoc bin ⊥ y)))]
+    ['() ⊥]))
+
 ;; Raw implementation first to play with.
 
 (define-type Module Symbol)
@@ -298,13 +307,21 @@ Expr template:
   [(_) (seteq)])
 
 (: kont-touch : (-> Kont (Setof Any)))
-(define/match (kont-touch κ)
-  [((scons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
-  [((econs φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
-  [((acons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
-  [((bcons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
-  [((lcons φ κ)) (set-union (frame-touch φ) (kont-touch κ))]
-  [('()) (seteq)])
+(define (kont-touch κ)
+  (: both : (-> Frame Kont (Setof Any)))
+  (define (both φ κ) (set-union (frame-touch φ) (kont-touch κ)))
+  (match κ
+    [(scons φ κ) (both φ κ)]
+    [(econs φ κ) (both φ κ)]
+    [(tcons φ κ) (both φ κ)]
+    [(acons φ κ) (both φ κ)]
+    [(bcons φ κ) (both φ κ)]
+    [(ccons φ κ) (both φ κ)]
+    [(pcons φ κ) (both φ κ)]
+    [(lcons φ κ) (both φ κ)]
+    [(vcons φ κ) (both φ κ)]
+    [(hcons φ κ) (both φ κ)]
+    ['() (seteq)]))
 
 ;; ℘[Addr] Map[Addr,Value] -> (values Strongly-reachable Only-weakly-reachable)
 (: reachable : (-> (Setof Any) Store (Setof Any)))
@@ -670,10 +687,7 @@ Expr template:
 ;; If (kl T) then (· ∂_E(T) (kl T))
 (struct seqk ([T : TCon-Value]) #:transparent)
 (struct tunitary ([C : (-> TCon-Value TCon-Value)]) #:transparent)
-(define negt (tunitary (λ (T)
-                          (define nulld (ν?v T))
-                          (when nulld (printf "Null! ~a~%" (prettyfy pretty-value T)))
-                          (if nulld -⊥ (mk¬v T)))))
+(define negt (tunitary (λ (T) (if (ν?v T) -⊥ (mk¬v T)))))
 
 ;; Making structural contract frames
 (struct negk ([Ss- : (Listof SContract)] [S+ : SContract] [ℓ : Label] [e : Expr] [ρ : Env] [Svs- : (Listof SContractv)]) #:transparent) ;; left of ->
@@ -707,7 +721,12 @@ Expr template:
                          clo-to-bind kunitary mkt firstT kbin₀ kbin₁ ;; making tcons
                          ))
 
-(define-type Frame (U sk arrk mkflat blcall blret flatk
+(define-type Frame (U arrk mkflat
+                      sk
+                      blcall blret
+                      mk-tcon pred-to-T
+                      flatk
+                      sret ch*k checking
                       SCon-Frame Ev-Frame Deriv-Frame Check-Frame))
 ;; Events
 (struct call ([ℓ : Label] [fn : Clo/blessed] [args : (Listof Value)]) #:transparent)
@@ -787,10 +806,11 @@ Expr template:
        ;; Temporal contract has been derived against call message.
        ;; If it's blatantly bad, then blame.
        (define orig (hash-ref σ η (λ () -⊤)))
+#;
        (printf "Event ~a at ~a: ~a~%"
-                     (prettyfy pretty-value ev)
-                     (prettyfy pretty-value orig)
-                     (prettyfy pretty-value v))
+               (prettyfy pretty-value ev)
+               (prettyfy pretty-value orig)
+               (prettyfy pretty-value v))
        (if (μ?v v)
            (tblame ℓ- `((original ,orig)
                         (justification ,(whyμ?v v))) ev)
@@ -799,10 +819,11 @@ Expr template:
       [(blret ev)
        (match-define (ret _ (Clo/blessed _ ℓ+ _ _ _ η _) rv) ev)
        (define orig (hash-ref σ η (λ () -⊤)))
+#;
        (printf "Event ~a at ~a: ~a~%"
-                     (prettyfy pretty-value ev)
-                     (prettyfy pretty-value orig)
-                     (prettyfy pretty-value v))
+               (prettyfy pretty-value ev)
+               (prettyfy pretty-value orig)
+               (prettyfy pretty-value v))
        ;; Temporal contract has been derived against return message.
        ;; If it's blatantly bad, then blame.
        (if (μ?v v)
@@ -979,6 +1000,7 @@ Expr template:
                         [v1 (second args*)]
                         [ans (and (not (or (undefined? v0) (undefined? v1)))
                                   (value-equal? v0 v1 σ))])
+#;
                    (printf "Checking equality of ~a, ~a: ~a~%"
                            (prettyfy pretty-value v0)
                            (prettyfy pretty-value v1)
@@ -1109,6 +1131,7 @@ Expr template:
            (ev T ρ σ (econs (firstT v) κ))
            (stuck ς "tmon expects a timeline object"))]
       [(firstT η) (ensure-tcon (λ (v)
+#;
                                   (printf "Initial ~a: ~a~%"
                                           (prettyfy pretty-value η)
                                           (prettyfy pretty-value v))
@@ -1576,15 +1599,6 @@ Expr template:
   [((cons/blessed Av Dv)) `(cons/c ,(pretty-sconv Av) ,(pretty-sconv Dv))]
   [((? any/c?)) 'any/c]
   [(v) (pretty-value (cast v Value))])
-
-(: rassoc : (All (A) (-> (-> A A A) A (Listof A) A)))
-(define (rassoc bin ⊥ lst)
-  (match lst
-    [(cons x y)
-     (if (null? y)
-         x
-         (bin x (rassoc bin ⊥ y)))]
-    ['() ⊥]))
 
 (define ex-common
   '((define narf (make-box #f))

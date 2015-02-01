@@ -179,11 +179,10 @@
       [(TΛ: sy x st)
        (mk-TΛ sy x ;; Add a name just so Cuts line up.
               (Scope
-               (*TRUnion sy
+               (*TUnion sy
                          (for/list ([t (in-set (hash-ref (or (instantiations) ⊥) τ ∅))])
                            (self (open-scope st t))))))]
-      [(TSUnion: sy ts) (*TSUnion sy (map self ts))]
-      [(TRUnion: sy ts) (*TRUnion sy (map self ts))]
+      [(TUnion: sy ts) (*TUnion sy (map self ts))]
       [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
       [(? TBound?) 
        (error 'self-referential? "We shouldn't see deBruijn indices here ~a" τ)]
@@ -229,8 +228,8 @@
       [(ERef sy _ x) (ERef sy ct* x)]
       [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
-      [(ELet sy _ bus body) (ELet sy ct* (hbus bus names) (self body))]
-      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (hrules rules names))]
+      [(ELet sy _ bus body) (ELet sy ct* (hbus bus) (self body))]
+      [(EMatch sy _ de rules) (EMatch sy ct* (self de) (hrules rules))]
       [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
       [(EEmpty-Map sy _) (EEmpty-Map sy ct*)]
       [(EEmpty-Set sy _) (EEmpty-Set sy ct*)]
@@ -324,9 +323,9 @@
      (mk-Tμ sy x (Scope (solidify-τ t)) tr n)]
     [(TΛ: sy x (Scope t))
      (mk-TΛ sy x (Scope (solidify-τ t)))]
-    [(TSUnion: sy ts) (*TSUnion sy (map solidify-τ ts))]
-    [(TRUnion: sy ts) (*TRUnion sy (map solidify-τ ts))]
+    [(TUnion: sy ts) (*TUnion sy (map solidify-τ ts))]
     [(TCut: sy t u) (mk-TCut sy (solidify-τ t) (solidify-τ u))]
+    [(? T⊤?) T⊤]
     [_ (error 'solidify-τ "Bad type ~a" τ)]))
 (trace solidify-τ)
 

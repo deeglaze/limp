@@ -8,6 +8,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define ∅eq (seteq))
 (define ∅ (set))
+(define ⊥eq (hasheq))
 (define ⊥ (hash))
 (struct -unmapped ())
 (define unmapped (-unmapped))
@@ -41,12 +42,32 @@
   (let rec ([l l] [acc '()])
     (match l
       ['() acc]
-      [(cons x l) (rec l (cons (f x) acc))])))
+      [(cons x l) (rec l (cons (f x) acc))]
+      [_ (error 'rev-map "Not a list ~a" l)])))
 
 (define (rev-append r l)
   (match r
     ['() l]
-    [(cons r rs) (rev-append rs (cons r l))]))
+    [(cons r rs) (rev-append rs (cons r l))]
+    [_ (error 'rev-append "Not a list ~a" r)]))
+
+;; trans-close : ∀ A. Setof[Pairof[A,A]] -> Setof[Pairof[A,A]]
+;; Interpret `pairs` as a finite relation and compute the transitive closure
+(define (trans-close pairs)
+  (let loop ([todo pairs] [seen pairs])
+    (cond
+     [(set-empty? todo) seen]
+     [else
+      (match-define (and (cons L R) p) (set-first todo))
+      ;; Found L -> R
+      ;; Find all R -> RR and add L -> RR to todo
+      (define work
+        (for*/set ([p (in-set seen)]
+                   #:when (equal? (car p) R)
+                   [p* (in-value (cons L (cdr p)))]
+                   #:unless (set-member? seen p*))
+          p*))
+      (loop (set-union (set-rest todo) work) (set-union seen work))])))
 
 ;; symbol->keyword
 (define (s->k s) (string->keyword (symbol->string s)))
