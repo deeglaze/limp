@@ -24,131 +24,142 @@
     [(quote x) (identifier? #'x) #t]
     [_ #f]))
 
-(type-print-verbosity 3)
+;(type-print-verbosity 3)
 
-(with-limits 600 2048
+(with-limits 120 2048
  (parameterize ([current-language
-                 (parse-language
-                  #'([(e) Expr (app Expr Exprs)
-                      x
-                      (lam xs Expr)
-                      (smon ℓ ℓ S e)
-                      (tmon e e)
-                      (begine Expr Exprs)
-                      (letrece LClauses Expr)
-                      (ife Expr Expr Expr)
-                      TCon-syntax
-                      (primop Primops)
-                      Datum
-                      #:bounded]
-                     [(cs) LClauses (NLC) (LC x Expr cs)]
-                     [(T) TCon
-                      (bindv v) (tpredv v) ;; HOASy way to do it.
-                      (¬v T) (klv T)
-                      (·v T T) (∪v T T) (∩v T T)
-                      (⊥) (⊤) (ε) #:trust-construction]
-                     [(Tsyn) TCon-syntax (bind Expr) (tpred Expr) (¬ Tsyn) (kl Tsyn) (· Tsyn Tsyn)
-                      (∪ Tsyn Tsyn) (∩ Tsyn Tsyn) (⊥) (⊤) (ε)]
+                 (heapify-language
+                  (parse-language
+                   #'(;; Syntax
+                      [(e) Expr (app Expr Exprs)
+                       x
+                       (lam xs Expr)
+                       (smon ℓ ℓ Ssyn e)
+                       (tmon e Tsyn)
+                       (begine Expr Exprs)
+                       (letrece LClauses Expr)
+                       (ife Expr Expr Expr)
+                       TCon-syntax
+                       (primop Primop)
+                       Datum
+                       #:bounded]
+                      [(cs) LClauses (NLC) (LC x Expr cs)]
+                      [(Tsyn) TCon-syntax (bind Expr) (tpred Expr) (¬ Tsyn) (kl Tsyn) (· Tsyn Tsyn)
+                       (∪ Tsyn Tsyn) (∩ Tsyn Tsyn) (⊥) (⊤) (ε)]
 
-                     [(S) SCon fnv (-->/blessed Ss S ℓ η) (cons/c S S) (any/c)]
-                     [(Ss) SCons (#:inst TList SCon)]
-                     [(Ssyn) SCon-syntax (flat Expr) (--> Ssyns Ssyn ℓ Expr) (any/c)
-                      (cons/c Ssyn Ssyn)]
-                     [(Ssyns) SCon-syntaxes (#:inst TList Ssyn)]
-                     [(es) Exprs (#:inst TList Expr)]
-                     [(xs) Names (#:inst TList Name)]
-                     [(fnv) Proc-Value (primop Primops) (Clo xs Expr Env) (Weakly Blessed) Blessed]
-                     [Blessed (Clo/blessed ℓ ℓ (#:inst TList SCon) S ℓ η fnv)]
-                     [event (call fnv Values) (ret fnv Value)]
-                     [(v) Value
-                      fnv T η
-                      event
-                      (LR-cell (#:addr #:expose #:identity)) ;; letrec without CESK
-                      ;; automatically weak-boxes the arguments.
-                      Primops Datum (cons Value Value)]
-                     [(η) Timeline (timeline (#:addr #:expose #:identity))]
-                     [(vs) Values (#:inst TList Value)]
-                     [(ρ) Env (#:map Name Value #:externalize)]
-                     [TList (#:Λ [X #:trusted] (#:U (Nil) (TCons X (#:inst TList X))))
-                            #:trust-construction]
-                     [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
+                      [(S) SCon (predv fnv) (-->/blessed Ss S ℓ η) (cons/c S S) (any/c)]
+                      [(Ss) SCons (#:inst TList SCon)]
+                      [(Ssyn) SCon-syntax (flat Expr) (--> Ssyns Ssyn ℓ Expr) (any/c)
+                       (cons/c Ssyn Ssyn)]
+                      [(Ssyns) SCon-syntaxes (#:inst TList Ssyn)]
+                      [(es) Exprs (#:inst TList Expr)]
+                      [(xs) Names (#:inst TList Name)]
+
+                      ;; Values
+                      [(T) TCon
+                       (bindv (#:weak fnv)) (tpredv (#:weak fnv)) ;; HOASy way to do it.
+                       (¬v T) (klv T)
+                       (·v T T) (∪v T T) (∩v T T)
+                       (⊥) (⊤) (ε) #:trust-construction]
+                      [(fnv) Proc-Value (primop Primop) (Clo xs Expr Env) Blessed]
+                      [Blessed (Clo/blessed ℓ ℓ (#:inst TList SCon) S ℓ η fnv)]
+                      [event (call fnv Values) (ret fnv Value)]
+                      [(v) Value
+                       fnv T η
+                       event
+                       (LR-cell (#:addr #:expose #:identity)) ;; letrec without CESK
+                       ;; automatically weak-boxes the arguments.
+                       Primop Datum (cons Value Value)]
+                      [(η) Timeline (timeline (#:addr #:expose #:identity))]
+                      [(vs) Values (#:inst TList Value)]
+
+                      ;; Components
+                      [(ρ) Env (#:map Name Value #:externalize)]
+                      [TList (#:Λ [X #:trusted] (#:U (Nil) (TCons X (#:inst TList X))))
+                             #:trust-construction]
+                      [List (#:Λ X (#:U (Nil) (Cons X (#:inst List X))))]
                     
-                     [(φ) Frame AFrame BFrame CFrame DFrame EFrame
-                      HFrame LFrame PFrame SFrame VFrame]
+                      ;; Frames
+                      [(φ) Frame AFrame BFrame CFrame DFrame EFrame
+                       HFrame LFrame PFrame SFrame VFrame]
                    
-                     [(aφ) AFrame (arrk Ss S ℓ) (mkflat)]
-                     [(bφ) BFrame (sk ℓ ℓ e ρ)]
-                     [(cφ) CFrame (chDk ℓ ℓ S v) (consk v)]
-                     [(dφ) DFrame (negt)
-                      (∪₀ T event η ℓ) (∩₀ T event η ℓ)
-                      (∪₁ T) (∩₁ T)
-                      (seq2k T event η ℓ) (seqk T)]
-                     [(eφ) EFrame (evk es vs ρ) (ifk e e ρ) (lrk x cs e ρ) (begink es ρ)
-                      (wrapk ℓ ℓ S) (chret Blessed) (clo-to-bind) (clo-to-pred) (klk) (¬k)
-                      (mkt Tsyn ρ) (firstT η)
-                      (m·₀ Tsyn ρ) (m∩₀ Tsyn ρ) (m∪₀ Tsyn ρ)
-                      (m·₁ T) (m∪₁ T) (m∩₁ T)]
-                     [(hφ) HFrame (Checking) (sret Blessed) (ch*k Ss Blessed vs vs)]
-                     [(lφ) LFrame (blret event) (blcall Blessed vs event)]
-                     [(pφ) PFrame (mk-tcon) (pred-to-T)]
-                     [(sφ) SFrame (negk Ssyns Ssyn ℓ e ρ Ss)
-                      (mkd Ssyn ρ) (mkcons S) (timelinek Ss ℓ e ρ)]
-                     [(vφ) VFrame (flatk v fnv ℓ)]
+                      [(aφ) AFrame (arrk Ss S ℓ) (mkflat)]
+                      [(bφ) BFrame (sk ℓ ℓ e ρ)]
+                      [(cφ) CFrame (chDk ℓ ℓ S v) (consk v)]
+                      [(dφ) DFrame (negt)
+                       (∪₀ T event η ℓ) (∩₀ T event η ℓ)
+                       (∪₁ T) (∩₁ T)
+                       (seq2k T event η ℓ) (seqk T)]
+                      [(eφ) EFrame (evk es vs ρ) (ifk e e ρ) (lrk x cs e ρ) (begink es ρ)
+                       (wrapk ℓ ℓ S) (chret Blessed) (clo-to-bind) (clo-to-pred) (klk) (¬k)
+                       (mkt Tsyn ρ) (firstT η)
+                       (m·₀ Tsyn ρ) (m∩₀ Tsyn ρ) (m∪₀ Tsyn ρ)
+                       (m·₁ T) (m∪₁ T) (m∩₁ T)]
+                      [(hφ) HFrame (Checking) (sret Blessed) (ch*k Ss Blessed vs vs)]
+                      [(lφ) LFrame (blret event) (blcall Blessed vs event)]
+                      [(pφ) PFrame (mk-tcon) (pred-to-T)]
+                      [(sφ) SFrame (negk Ssyns Ssyn ℓ e ρ Ss)
+                       (mkd Ssyn ρ) (mkcons S) (timelinek Ss ℓ e ρ)]
+                      [(vφ) VFrame (flatk v (predv fnv) ℓ)]
 
-                     [(eκ) EKont (Halt) (ECons eφ eκ) (PCons pφ tκ) (VCons vφ cκ) (ACons aφ sκ)]
-                     [(cκ) CKont (CCons cφ cκ) (HCons hφ eκ)]
-                     [(tκ) TKont (τCons dφ tκ) (LCons lφ eκ)]
-                     [(sκ) SKont (SCons sφ sκ) (BCons bφ eκ)]
+                      ;; Continuations
+                      [(eκ) EKont (Halt) (ECons eφ eκ) (PCons pφ tκ) (VCons vφ cκ) (ACons aφ sκ)]
+                      [(cκ) CKont (CCons cφ cκ) (HCons hφ eκ)]
+                      [(tκ) TKont (τCons dφ tκ) (LCons lφ eκ)]
+                      [(sκ) SKont (SCons sφ sκ) (BCons bφ eκ)]
                     
-                     [State (ans v)
-                            (blame ℓ S v)
-                            (tblame ℓ T event)
+                      ;; States
+                      [State (ans v)
+                             (blame ℓ S v)
+                             (tblame ℓ T event)
                            
-                            (ev e ρ eκ)
-                            (ev-syn Ssyn ρ sκ)
-                            (co eκ v)
-                            (cod tκ T)
-                            (coc cκ v)
-                            (cos sκ S)
-                            (send T event ℓ η tκ)
-                            (check ℓ ℓ S v cκ)
-                            (check-app (#:inst TList S) vs Blessed vs eκ)
-                            (ap fnv vs eκ)]
-                     ;; Externals
-                     [(ℓ) #:external Label #:syntax recognize-label]
-                     [(x) #:external Name #:syntax identifier?]
-                     [(cons) #:external Cons-name #:syntax
-                      (λ (stx) (and (identifier? stx) (free-identifier=? stx #'cons)))]
-                     [#:external Datum
-                                 #:syntax
-                                 (λ (s)
-                                    (with-handlers ([values (λ _ #f)])
-                                      (define ev
-                                        (parameterize
-                                            ([sandbox-eval-limits (list 1 1)])
-                                          (make-evaluator 'racket/base)))
-                                      (define x
-                                        (call-in-sandbox-context ev
-                                                                 (λ () (eval-syntax s))))
-                                      (or (symbol? x)
-                                          (boolean? x)
-                                          (number? x)
-                                          (string? x)
-                                          (null? x)
-                                          (void? x))))]
-                     [#:external Real #:syntax (λ (s) (real? (syntax-e #'s)))]
-                     #:subtype* (boolean Real) Datum
-                     [#:external Primops #:syntax
-                                 (λ (s) (memv (syntax-e s) '(cons car cdr pair? null?
-                                                                  not box? make-box unbox
-                                                                  call? call-label call-fn call-args
-                                                                  ret? ret-fn ret-label ret-value
-                                                                  boolean? real? equal? set-box! <=
-                                                                  new-timeline)))]
-                     [#:external Real? #:syntax (λ (s) (eq? 'real? (syntax-e #'s)))]
-                     #:subtype Real? Primops
-                     #;[#:external Flat-Racket #:syntax (λ (s) #t)]
-                     ))])
+                             (ev e ρ eκ)
+                             (ev-syn Ssyn ρ sκ)
+                             (coe eκ v)
+                             (cod tκ T)
+                             (coc cκ v)
+                             (cos sκ S)
+                             (send T event ℓ η tκ)
+                             (check ℓ ℓ S v cκ)
+                             (check-app (#:inst TList S) vs Blessed vs eκ)
+                             (ap fnv vs eκ)]
+                      ;; Externals
+                      [(ℓ) #:external Label #:syntax recognize-label]
+                      [(x) #:external Name #:syntax identifier?]
+                      [(cons) #:external Cons-name #:syntax
+                       (λ (stx) (and (identifier? stx) (free-identifier=? stx #'cons)))]
+                      [#:external Datum
+                                  #:syntax
+                                  (λ (s)
+                                     (with-handlers ([values (λ _ #f)])
+                                       (define ev
+                                         (parameterize
+                                             ([sandbox-eval-limits (list 1 1)])
+                                           (make-evaluator 'racket/base)))
+                                       (define x
+                                         (call-in-sandbox-context ev
+                                                                  (λ () (eval-syntax s))))
+                                       (or (symbol? x)
+                                           (boolean? x)
+                                           (number? x)
+                                           (string? x)
+                                           (null? x)
+                                           (void? x))))]
+                      [#:external Real #:syntax (λ (s) (real? (syntax-e #'s)))]
+                      #:subtype* (boolean Real) Datum
+                      [#:external Primop #:syntax
+                                  (λ (s) (memv (syntax-e s) '(cons car cdr pair? null?
+                                                                   not box? make-box unbox
+                                                                   call? call-label call-fn call-args
+                                                                   ret? ret-fn ret-label ret-value
+                                                                   boolean? real? equal? set-box! <=
+                                                                   add1 sub1 zero?
+                                                                   new-timeline)))]
+                      [#:external Real? #:syntax (λ (s) (eq? 'real? (syntax-e #'s)))]
+                      #:subtype Real? Primop
+                      #;[#:external Flat-Racket #:syntax (λ (s) #t)]
+                      ))
+                  #f)])
 
    (define CESK
      (parse-reduction-relation
@@ -158,27 +169,27 @@
                          [(app e0 es)
                           (ev e0 ρ (ECons (evk es (Nil) ρ) κ))]
                          [(lam ys e*)
-                          (co κ (Clo ys e* ρ))]
+                          (coe κ (Clo ys e* ρ))]
                          [#:name var-lookup
-                                 (#:and (#:has-type Name) x)
-                                 (co κ (#:match (#:map-lookup ρ x)
+                                 (#:has-type Name x)
+                                 (coe κ (#:match (#:map-lookup ρ x)
                                                 [(LR-cell a) (#:cast Value (#:lookup a #:delay))]
                                                 [v v]))]
                          [(smon ℓ+ ℓ- S e*)
                           (ev-syn S ρ (BCons (sk ℓ+ ℓ- e* ρ) κ))]
-                         [(tmon ηe Te)
-                          (ev ηe ρ (ECons (mkt Te ρ) κ))]
+                         [(tmon ηe Tsyn)
+                          (ev ηe ρ (ECons (mkt Tsyn ρ) κ))]
                          [(ife g th el)
                           (ev g ρ (ECons (ifk th el ρ) κ))]
                          [(letrece (NLC) e*)
                           (ev e* ρ κ)]
-                         [(letrece (#:and cs (LC x e* cs*)) body)
+                         [(letrece (#:name cs (LC x e* cs*)) body)
                           (ev e* ρ* (ECons (lrk x cs* body ρ*) κ))
                           [#:where ρ* (#:call clause-alloc ρ cs)]]
                          [(begine e0 es)
                           (ev e0 ρ (ECons (begink es ρ) κ))]
-                         [(#:and v (#:has-type Value))
-                          (co κ v)]
+                         [(#:has-type Value v)
+                          (coe κ v)]
                          [(bind e*)
                           (ev e* ρ (ECons (clo-to-bind) κ))]
                          [(tpred e*)
@@ -194,36 +205,36 @@
                          [(∩ T0 T1)
                           (ev T0 ρ (ECons (m∩₀ T1 ρ) κ))])]
 
-         [#:--> (co (Halt) v) (ans v)]
+         [#:--> (coe (Halt) v) (ans v)]
 
-         [#:--> (co (ACons φ κ) v)
+         [#:--> (coe (ACons φ κ) v)
                 (#:match φ
                          [(mkflat)
-                          (cos κ pred)
-                          [#:where (#:and (#:has-type fnv) pred) v]]
+                          (cos κ (predv pred))
+                          [#:where (#:has-type fnv pred) v]]
                          [(arrk Svs Sv ℓ)
                           (cos κ (-->/blessed (#:call reverse #:inst [S] Svs) Sv ℓ η))
-                          [#:where (#:and (#:has-type Timeline) η) v]])]
+                          [#:where (#:has-type Timeline η) v]])]
 
-         [#:--> (co (PCons φ κ) v)
+         [#:--> (coe (PCons φ κ) v)
                 (#:match φ
                          [(mk-tcon)
                           (cod κ (#:cast TCon v))]
                          [(pred-to-T)
-                          (cod κ (#:if v (⊥) (ε)))])]
+                          (cod κ (#:if v (ε) (⊥)))])]
 
-         [#:--> (co (VCons (flatk vc bfn ℓ-) κ) v)
-                (coc κ v)
-                [#:when v]]
+         [#:--> (coe (VCons (flatk vc Sp ℓ-) κ) v)
+                (#:if v
+                      (coc κ vc)
+                      (blame ℓ- Sp vc))]
 
-         [#:--> (co (ECons φ κ) v)
+         [#:--> (coe (ECons φ κ) v)
                 (#:match φ
-
                          [(evk (TCons e es) vs ρ)
                           (ev e ρ (ECons (evk es (TCons v vs) ρ) κ))]
                          [(evk (Nil) vs ρ)
                           (ap fn vs* κ)
-                          [#:where (TCons fn vs*)
+                          [#:where (TCons (#:has-type fnv fn) vs*)
                                    (#:call reverse #:inst [Value] vs)]]
                          [(ifk t e ρ)
                           (ev (#:if v t e) ρ κ)]
@@ -233,39 +244,31 @@
                                     [#:where (LR-cell a) (#:map-lookup ρ x)]
                                     [#:update a v]]
                                    [(LC y e cs*) (ev e ρ (ECons (lrk y cs body ρ) κ))])]
-                         [(clo-to-bind)
-                          (#:match v
-                                   [(Clo _ _ _) (co κ (bindv (Weakly v)))]
-                                   [(Clo/blessed _ _ _ _ _ _ _) (co κ (bindv (Weakly v)))]
-                                   [(Weakly _) (co κ (bindv v))])]
-                         [(clo-to-pred)
-                          (#:match v
-                                   [(Clo _ _ _) (co κ (tpredv (Weakly v)))]
-                                   [(Clo/blessed _ _ _ _ _ _ _) (co κ (tpredv (Weakly v)))]
-                                   [(Weakly _) (co κ (tpredv v))])]
+                         [(clo-to-bind) (coe κ (bindv (#:cast fnv v)))]
+                         [(clo-to-pred) (coe κ (tpredv (#:cast fnv v)))]
                          [(mkt T ρ)
-                          (ev T ρ (ECons (firstT v) κ))]
+                          (ev T ρ (ECons (firstT (#:cast Timeline v)) κ))]
                          [(firstT (timeline a))
-                          (co κ (#:external Datum (void)))
+                          (coe κ (#:external Datum (void)))
                           [#:update a v]]
 
                          [(m·₀ T ρ)
-                          (ev T ρ (ECons (m·₁ v) κ))]
+                          (ev T ρ (ECons (m·₁ (#:cast TCon v)) κ))]
                          [(m∪₀ T ρ)
-                          (ev T ρ (ECons (m∪₁ v) κ))]
+                          (ev T ρ (ECons (m∪₁ (#:cast TCon v)) κ))]
                          [(m∩₀ T ρ)
-                          (ev T ρ (ECons (m∩₁ v) κ))]
+                          (ev T ρ (ECons (m∩₁ (#:cast TCon v)) κ))]
                          [(m·₁ T)
-                          (co κ (·v T v))]
+                          (coe κ (·v T (#:cast TCon v)))]
                          [(m∪₁ T)
-                          (co κ (∪v T v))]
+                          (coe κ (∪v T (#:cast TCon v)))]
                          [(m∩₁ T)
-                          (co κ (∩v T v))]
+                          (coe κ (∩v T (#:cast TCon v)))]
                          [(begink es ρ)
                           (#:match es
-                                   [(Nil) (co κ v)]
+                                   [(Nil) (coe κ v)]
                                    [(TCons e es*) (ev e ρ (ECons (begink es* ρ) κ))])]
-                         [(chret (#:and (Clo/blessed ℓ- ℓ+ _ Sv+ _ η _) fn))
+                         [(chret (#:name fn (Clo/blessed ℓ- ℓ+ _ Sv+ _ η _)))
                           (check ℓ+ ℓ- Sv+ v (HCons (sret fn) κ))]
                          [(wrapk ℓ+ ℓ- Sv)
                           (check ℓ+ ℓ- Sv v (HCons (Checking) κ))])]
@@ -315,64 +318,63 @@
                                            (seqk T₁))]]
                          [(∪v T₀ T₁) (send T₀ ev ℓ η (τCons (∪₀ T₁ ev η ℓ) κ))]
                          [(∩v T₀ T₁) (send T₀ ev ℓ η (τCons (∩₀ T₁ ev η ℓ) κ))]
-                         [(#:and v (#:has-type fnv))
-                          (ap v (TCons ev (Nil)) (PCons (pred-to-T) κ))])]
+                         [(tpredv v) (ap v (TCons ev (Nil)) (PCons (pred-to-T) κ))])]
 
          [#:--> (check-app (Nil)
                            (Nil)
-                           (#:and fn (Clo/blessed ℓ- ℓ+ _ sv+ ℓ η clv)) vs-checked κ)
+                           (#:name fn (Clo/blessed ℓ- ℓ+ _ sv+ ℓ η clv)) vs-checked κ)
                 (send (#:cast TCon (#:lookup a)) ev ℓ- η (LCons (blcall fn args-checked ev) κ))
                 [#:where (timeline a) η]
                 [#:where args-checked (#:call reverse #:inst [Value] vs-checked)]
                 [#:where ev (call fn args-checked)]]
          [#:--> (check-app (TCons Sv- Svs-) (TCons v0 vs-to-check)
-                           (#:and fn (Clo/blessed ℓ- ℓ+ _ _ _ _ _)) vs-checked κ)
+                           (#:name fn (Clo/blessed ℓ- ℓ+ _ _ _ _ _)) vs-checked κ)
                 (check ℓ- ℓ+ Sv- v0 (HCons (ch*k Svs- fn vs-to-check vs-checked) κ))]
 
          [#:--> (check ℓ+ ℓ- S v κ)
                 (#:match S
                          [(-->/blessed Svs- Sv+ ℓ η)
                           (#:match v
-                                   [(Clo args _ _)
-                                    (coc κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v))
+                                   [(#:name v* (Clo args _ _))
+                                    (coc κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v*))
                                     [#:when (#:call eq-len args Svs-)]]
-                                   [(Clo/blessed _ _ args _ _ _ _)
-                                    (coc κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v))
+                                   [(#:name v* (Clo/blessed _ _ args _ _ _ _))
+                                    (coc κ (Clo/blessed ℓ- ℓ+ Svs- Sv+ ℓ η v*))
                                     [#:when (#:call eq-len args Svs-)]])]
                          [(cons/c A D)
                           (#:match v
                                    [(cons Av Dv) (check ℓ+ ℓ- A Av (CCons (chDk ℓ+ ℓ- D Dv) κ))]
                                    [_ (blame ℓ+ S v)])]
                          [(any/c) (coc κ v)]
-                         [_ (ap S (TCons v (Nil)) (VCons (flatk v S ℓ-) κ))])]
+                         [(#:name Sp (predv fn)) (ap fn (TCons v (Nil)) (VCons (flatk v Sp ℓ-) κ))])]
 
          [#:--> (coc (CCons φ κ) v)
                 (#:match φ
                          [(chDk ℓ+ ℓ- D Dv)
                           (check ℓ+ ℓ- D Dv (CCons (consk v) κ))]
-                         [(consk Av) (co κ (cons Av v))])]
+                         [(consk Av) (coc κ (cons Av v))])]
          [#:--> (coc (HCons φ κ) v)
                 (#:match φ
                          [(ch*k Svs- fn vs-to-check vs-checked)
-                          (check-app Svs- fn vs-to-check (TCons v vs-checked) κ)]
-                         [(sret (#:and fn (Clo/blessed ℓ- ℓ+ _ _ ℓ η _)))
+                          (check-app Svs- vs-to-check fn (TCons v vs-checked) κ)]
+                         [(sret (#:name fn (Clo/blessed ℓ- ℓ+ _ _ ℓ η _)))
                           (send (#:cast TCon (#:lookup a)) event ℓ+ η (LCons (blret event) κ))
                           [#:where (timeline a) η]
                           [#:where event (ret fn v)]]
-                         [(Checking) (co κ v)])]
+                         [(Checking) (coe κ v)])]
 
          [#:--> (cod (LCons φ κ) v)
                 (#:match φ
-                         [(blcall (#:and fn (Clo/blessed ℓ- ℓ+ _ Sv+ ℓ (timeline a) clv)) vs ev)
+                         [(blcall (#:name fn (Clo/blessed ℓ- ℓ+ _ Sv+ ℓ (timeline a) clv)) vs ev)
                           (#:if (#:call μ?v v)
                                 (tblame ℓ- (#:cast TCon (#:lookup a)) ev)
                                 (#:let ([#:update a v])
                                        (ap clv vs (ECons (chret fn) κ))))]
-                         [(blret (#:and ev (ret (Clo/blessed _ ℓ+ _ _ _ (timeline a) _) rv)))
+                         [(blret (#:name ev (ret (Clo/blessed _ ℓ+ _ _ _ (timeline a) _) rv)))
                           (#:if (#:call μ?v v)
                                 (tblame ℓ+ (#:cast TCon (#:lookup a)) ev)
                                 (#:let ([#:update a v])
-                                       (co κ rv)))])]
+                                       (coe κ rv)))])]
          [#:--> (cod (τCons φ κ) v)
                 (#:match φ
                          [(negt) (cod κ (#:if (#:call ν?v v*)
@@ -392,9 +394,9 @@
                 (ev e (#:call extend* #:inst [Name Value] ρ ws vs) κ)]
          [#:--> #:name prim-app
                 (ap (primop p) vs κ)
-                (co κ (#:call δ p vs))]
+                (coe κ (#:call δ p vs))]
          [#:--> #:name wrap-app
-                (ap (#:and fn (Clo/blessed _ _ Svs- _ _ _ _)) vs κ)
+                (ap (#:name fn (Clo/blessed _ _ Svs- _ _ _ _)) vs κ)
                 (check-app Svs- vs fn (Nil) κ)])))
 
    (define match-thru
@@ -412,15 +414,15 @@
            #'(rev-app : (#:∀ (A) (#:inst TList A) (#:inst TList A) → (#:inst TList A))
                       [(rev-app (Nil) acc) acc]
                       [(rev-app (TCons x xs) acc)
-                       (#:call rev-app #:inst [A] xs (TCons x acc))])
+                       (#:call rev-app #:inst [A] xs (TCons #:inst [A] x acc))])
            #'(extend* : (#:∀ (A B) (#:map A B) (#:inst TList A) (#:inst TList B) → (#:map A B))
                       [(extend* ρ (Nil) (Nil)) ρ]
                       [(extend* ρ (TCons a as) (TCons b bs))
                        (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)])
-           #'(δ : (Primops Values → Value)
+           #'(δ : (Primop Values → Value)
                 [(δ (#:external Real?) (TCons v (Nil)))
                  (#:match v
-                          [(#:has-type Real) #t]
+                          [(#:has-type Real _) #t]
                           [_ #f])])
            #'(mk¬v : (TCon → TCon)
                    [(mk¬v (¬v (¬v (¬v T))))
@@ -496,12 +498,12 @@
                      [(eq-len (TCons _ l) (TCons _ r)) (#:call eq-len l r)]
                      [(eq-len _ _) (#:external boolean #f)]))))
 
-   (printf "Post red~%")
-
    (define-values (CESK* metafunctions*)
      (tc-language CESK metafunctions Sτ))
-;   (pretty-print metafunctions*)
-;   (pretty-print CESK*)
+   (define-values (aCESK* ametafunctions*)
+     (coerce-language CESK* metafunctions*))
+   (pretty-print aCESK*)
+   (pretty-print ametafunctions*)
 
    (report-all-errors
     (append (append-map (λ (mf)
