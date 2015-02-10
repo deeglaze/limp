@@ -3,6 +3,7 @@
          "language.rkt"
          "self-reference.rkt"
          "tast.rkt"
+         "type-formers.rkt"
          "types.rkt"
          racket/dict
          racket/set
@@ -24,6 +25,7 @@
      (populate-expr-rules vh eh sh v)]
     [(Where _ pat e)
      (populate-expr-rules vh eh sh e)]
+    [(or (When _ e) (Unless _ e)) (populate-expr-rules vh eh sh e)]
     [_ (error 'populate-bu-rules "Bad bu ~a" bu)]))
 
 (define (populate-expr-rules vh eh sh e)
@@ -82,10 +84,15 @@
      (for ([bu (in-list bus)])
        (populate-bu-rules vh eh sh bu))
      (populate-expr-rules vh eh sh body)]
-    [(EMatch _ ct de rules)
+    [(EMatch _ _ de rules)
      (self de)
      (for ([rule (in-list rules)])
        (populate-rule-rules vh eh sh rule))]
+
+    [(EIf _ _ g th el)
+     (self g)
+     (self th)
+     (self el)]
     
     [(or (ECall _ _ _ _ es)
          (ESet-union _ _ es))
@@ -103,7 +110,7 @@
      (self e0)
      (self e1)]
 
-    [(or (? ERef?) (? EAlloc?) (? EEmpty-Map?) (? EEmpty-Set?)) (void)]
+    [(or (? ERef?) (? EAlloc?) (? EEmpty-Map?) (? EEmpty-Set?) (? EExternal?)) (void)]
     [_ (error 'populate-expr-rules "Unrecognized expression form: ~a" e)]))
 
 (define (populate-rule-rules vh eh sh rule)
@@ -160,6 +167,7 @@
   (define (self τ)
     (match τ
       [(or (? TAddr?) (? TExternal?) (? TFree?) (? TName?) (? THeap?)) τ]
+      [(? T⊤?) (mk-THeap #f limp-default-rec-addr #f τ)]
       [(TVariant: sy n ts tr)
        (if (try-alloc? τ tr)
            (mk-TVariant sy n (for/list ([t (in-list ts)])
@@ -173,22 +181,26 @@
        (define x* (if (try-alloc? τ tr)
                       (gensym x)
                       (cons 'trusted (gensym x))))
-       (printf "From heapify ~a~%" x*)
+;       (printf "From heapify ~a~%" x*)
        (mk-Tμ sy x (abstract-free (self (open-scope st (mk-TFree sy x*))) x*) tr n)]
-      ;; a quantified type is just all the known instantiations' heapifications.
-      [(TΛ: sy x st)
-       (mk-TΛ sy x ;; Add a name just so Cuts line up.
-              (Scope
-               (*TUnion sy
-                         (for/list ([t (in-set (hash-ref (or (instantiations) ⊥) τ ∅))])
-                           (self (open-scope st t))))))]
+      ;; a quantified type will be heapified at application time
+      [(TΛ: sy x st _) (mk-TΛ sy x st (λ (t)
+                                         (printf "Applied and became ~a: heapifing ...~%" t)
+                                         (define t* (self t))
+                                         (printf "Done ~a~%" t*)
+                                         t*))]
       [(TUnion: sy ts) (*TUnion sy (map self ts))]
       [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
+      [(TWeak: sy t) (mk-TWeak sy (self t))]
+      [(TUnif _ t)
+       (define τ* (self t))
+       (set-TUnif-τ! τ τ*)
+       τ*]
       [(? TBound?) 
        (error 'self-referential? "We shouldn't see deBruijn indices here ~a" τ)]
       [_ (error 'heapify-τ "Bad type ~a" τ)]))
-  (self τ))
-(trace heapify-τ)
+  (parameterize ([heapifying? #t]) (self τ)))
+;(trace heapify-τ)
 
 (define (heapify-language L heapify-nonrec?)
   (define us (Language-ordered-us L))
@@ -243,6 +255,7 @@
       [(EMap-remove sy _ m k) (EMap-remove sy ct* (self m) (self k))]
       [(EHeapify sy _ e taddr tag) (EHeapify sy ct* (self e) taddr tag)]
       [(EUnquote sy _ e) (EUnquote sy ct* e)]
+      [(EExternal sy _ v) (EExternal sy ct* v)]
       [_ (error 'heapify-expr "Unrecognized expression form: ~a" e)]))
   self)
 
@@ -266,8 +279,7 @@
   (define (self pat)
     (define ct* (hct (Typed-ct pat)))
     (match pat
-      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
-      [(PName sy _ x) (PName sy ct* x)]
+      [(PName sy _ x p) (PName sy ct* x (self p))]
       [(PWild sy _) (PWild sy ct*)]
       [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
       [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
@@ -276,9 +288,7 @@
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (ht t))]
       [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
-      [(PIsExternal sy _) (PIsExternal sy ct*)]
-      [(PIsAddr sy _) (PIsAddr sy ct*)]
-      [(PIsType sy _) (PIsType sy ct*)]
+      [(PIsType sy _ p) (PIsType sy ct* (self p))]
       [_ (error 'heapify-pat "Unsupported pattern: ~a" pat)]))
   self)
 
@@ -321,19 +331,20 @@
     [(TSet: sy tv ext) (mk-TSet sy (solidify-τ tv) ext)]
     [(Tμ: sy x (Scope t) tr n)
      (mk-Tμ sy x (Scope (solidify-τ t)) tr n)]
-    [(TΛ: sy x (Scope t))
-     (mk-TΛ sy x (Scope (solidify-τ t)))]
+    [(TΛ: sy x (Scope t) h)
+     (mk-TΛ sy x (Scope (solidify-τ t)) h)]
     [(TUnion: sy ts) (*TUnion sy (map solidify-τ ts))]
+    [(TWeak: sy t) (mk-TWeak sy (solidify-τ t))]
     [(TCut: sy t u) (mk-TCut sy (solidify-τ t) (solidify-τ u))]
     [(? T⊤?) T⊤]
     [_ (error 'solidify-τ "Bad type ~a" τ)]))
-(trace solidify-τ)
+;(trace solidify-τ)
 
 (define (solidify-language L)
   (define us (Language-ordered-us L))
   (define ordered
     (for/list ([(name ty) (in-dict us)])
-      (printf "Solidifying ~a, ~a~%" name ty)
+;      (printf "Solidifying ~a, ~a~%" name ty)
       (cons name (solidify-τ ty))))
   (struct-copy Language L
                [user-spaces (make-hash ordered)]

@@ -13,6 +13,7 @@
          "common.rkt"
          "language.rkt"
          "tast.rkt"
+         "type-formers.rkt"
          "types.rkt")
 (provide parse-language
          parse-reduction-relation
@@ -103,7 +104,7 @@ single address space
 (define-splicing-syntax-class (formal-splicing options)
   #:attributes (id x taddr)
   (pattern (~seq id:id (~or (~and #:trusted trusted)
-                           (~var modes (EM-Modes options #t #f))))
+                            (~var modes (EM-Modes options #t #f))))
            #:fail-unless (or (syntax? (attribute trusted))
                              (or (attribute modes.mm)
                                  (attribute modes.em)
@@ -112,12 +113,10 @@ single address space
            #:attr x (syntax-e #'id)
            #:attr taddr (if (syntax? (attribute trusted))
                             'trusted
-                            (if (syntax? (attribute trusted))
-                                'trusted
-                                (mk-TAddr #'modes
-                                          (attribute modes.space)
-                                          (attribute modes.mm)
-                                          (attribute modes.em))))))
+                            (mk-TAddr #'modes
+                                      (attribute modes.space)
+                                      (attribute modes.mm)
+                                      (attribute modes.em)))))
 
 (define-syntax-class (formal options)
   #:attributes (id x taddr)
@@ -194,6 +193,7 @@ single address space
                                  (syntax-e #'n)
                                  (attribute ts.t)
                                  trust))
+  (pattern (~and sy (#:weak tw)) #:attr t (mk-TWeak #'sy (attribute tw.t)))
   (pattern (~and sy (#:addr (~var modes (EM-Modes options #t #f))))
            #:attr t (mk-TAddr #'sy
                               (attribute modes.space)
@@ -252,9 +252,6 @@ single address space
 (define-syntax-class (inc-pat L)
   (pattern _ #:when (hash-ref (Language-options L) 'include-pattern-namespace #f)))
 
-(define-syntax-class (pand L)
-  (pattern #:and)
-  (pattern (~and (~literal and) (~var _ (inc-pat L)))))
 (define-syntax-class (pmapwith L)
   (pattern #:map-with)
   (pattern (~and (~literal map-with) (~var _ (inc-pat L)))))
@@ -295,8 +292,6 @@ single address space
   #:local-conventions ([#rx"^p" (Pattern-cls L #f)])
   (pattern (~and sy :Wild)
            #:attr pat (PWild #'sy ct))
-  (pattern (~and sy ((~var _ (pand L)) p ...))
-           #:attr pat (PAnd #'sy ct (attribute p.pat)))
   (pattern (~and sy ((~var _ (pmapwith L)) pk pv pm))
            #:attr pat (PMap-with #'sy ct
                                     (attribute pk.pat)
@@ -315,32 +310,35 @@ single address space
            #:attr pat (PSet-with* #'sy ct
                                     (attribute pv.pat)
                                     (attribute ps.pat)))
-  (pattern (~and sy ((~var _ (pname L)) x:id))
-           #:attr pat (PName #'sy ct (syntax-e #'x)))
+  (pattern (~and sy ((~var _ (pname L)) x:id p))
+           #:attr pat (PName #'sy ct (syntax-e #'x) (attribute p.pat)))
   (pattern (~and sy ((~var _ (paddr L)) name:id
                      (~var modes (EM-Modes (Language-options L) #f #f))))
-           #:attr pat (PIsAddr #'sy
-                               ;; FIXME: actually check that ct and the given taddr are the same
-                               ;; since a mismatch is an error.
-                               (or ct
-                                   (Cast
-                                    (mk-TAddr #'modes (syntax-e #'name)
-                                              (attribute modes.mm)
-                                              (attribute modes.em))))))
+           #:attr pat (let ([ct* (or ct
+                                     (Cast
+                                      (mk-TAddr #'modes (syntax-e #'name)
+                                                (attribute modes.mm)
+                                                (attribute modes.em))))])
+                        (PIsType #'sy
+                                 ;; FIXME: actually check that ct and the given taddr are the same
+                                 ;; since a mismatch is an error.
+                                 ct*
+                                 (PWild #'sy ct*))))
   (pattern (~and sy ((~var _ (pexternal L)) name:id))
            #:when (hash-has-key? (Language-external-spaces L) (syntax-e #'name))
-           #:attr pat (PIsExternal #'sy
-                                   (or ct ;; FIXME: same as above
-                                       (Cast
-                                        (mk-TExternal #'name (syntax-e #'name))))))
+           #:attr pat (let ([ct* (or ct ;; FIXME: same as above
+                                     (Cast
+                                      (mk-TExternal #'name (syntax-e #'name))))])
+                        (PIsType #'sy ct* (PWild #'sy ct))))
   (pattern (~and sy (n:id p ...))
            #:attr pat (PVariant #'sy ct (syntax-e #'n) (attribute p.pat)))
   (pattern (~and sy ((~var _ (pterm L)) (~var t (Term-cls L #f))))
            #:attr pat (PTerm #'sy ct (attribute t.tm)))
-  (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L))))
+  (pattern (~and sy ((~var _ (phastype L)) (~var t (Type-cls #t L)) p))
            #:when (mono-type? (attribute t.t))
            #:attr pat (PIsType #'sy (or ct ;; FIXME: same as above
-                                        (Cast (attribute t.t)))))
+                                        (Cast (attribute t.t)))
+                               (attribute p.pat)))
   (pattern (~and sy ((~var _ (pderef L))
                      (~or
                       (~once (~var modes (EM-Modes (Language-options L) #f #f)))
@@ -356,7 +354,7 @@ single address space
                                             (attribute modes.em))
                                   generic-TAddr)
                               (syntax? (attribute implicit))))
-  (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x)))
+  (pattern x:id #:attr pat (PName #'x ct (syntax-e #'x) (PWild #'x ct)))
   ;; Annotate/cast
   (pattern (#:ann (~var t (Type-cls #t L)) (~var pata (Pattern-cls L (Check (attribute t.t)))))
            #:attr pat (attribute pata.pat))
@@ -369,11 +367,7 @@ single address space
                                 (Language-user-spaces L)
                                 (Language-external-spaces L)
                                 (Language-meta-table L)))
-           #:do [(define t-op
-                   (parameterize ([current-language L])
-                     (check-productive-and-classify-unions (attribute pt.t) allow-raw?)))]
-           #:when t-op
-           #:attr t t-op))
+           #:attr t (attribute pt.t)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Limp Terms
@@ -650,7 +644,7 @@ Turn all free non-metavariables into external space names if they are bound.
      (~optional (~datum ....)) u:Unrolling]
     ;; use trust within type parsing.
     [(~optional (metas:id ...) #:defaults ([(metas 1) '()]))
-     name:id
+     name:id ~!
      (~or (~seq #:full (~commit (~var fty (PreType options
                                                    (attribute u.trust)
                                                    Unames Enames
@@ -818,41 +812,6 @@ Turn all free non-metavariables into external space names if they are bound.
                (hash-set! h (syntax-e name) info))
              h)))
 
-(define (contains-externalized? ts)
-  (for/or ([t (in-list ts)])
-    (match (resolve t)
-      [(or (TMap: _ _ _ ext) (TSet: _ _ ext)) ext]
-      [_ #f])))
-
-(define (any-union-contains-externalized? ty)
-  (define seen (mutable-seteq))
-  (let check ([ty ty])
-    (if (set-member? seen ty)
-        #f
-        (begin
-          (set-add! seen ty)
-          (match ty
-            [(or (Tμ: _ _ (Scope t) _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
-             (check t)]
-            [(or (? T⊤?) (? TAddr?) (? TExternal?) (? TName?) (? TBound?) (? TFree?)) #f]
-            [(TUnion: sy ts)
-             (if (contains-externalized? ts)
-                 (or sy #t)
-                 (ormap check ts))]
-            [(TVariant: _ name ts _) (ormap check ts)]
-            [(TCut: _ t* u) (check (resolve ty))]
-            [(TMap: _ t-dom t-rng _)
-             (or (check t-dom)
-                 (check t-rng))]
-            [_ (error 'bork)])))))
-
-;; TODO: sanity check that maps/sets that are "externalized" can't
-;; be self-referential without an intermediate variant construction.
-;; Possibly add trust tag, but ensure all types in mutual reference have
-;; the same level of trust.
-(define (check-externalized stx alst)
-  (void))
-
 (define (sset-map f s) (for/set ([u (in-set s)]) (f u)))
 
 (define (parse-language stx [extending #f])
@@ -871,18 +830,21 @@ Turn all free non-metavariables into external space names if they are bound.
        [(~var gather (Language-externals/user-ids ext))
         (define unames (sset-map syntax-e (attribute gather.unames)))
         (define enames (sset-map syntax-e (attribute gather.enames)))
+        (define mt (attribute gather.meta-table))
+        (printf "Meta table~%")
+        (pretty-print mt)
         ;; TODO: override/extend user classes in (or extending lang)
         (syntax-parse #'rest
           [((~or (~var usr (User-cls (attribute ops.options)
                                      unames
                                      enames
-                                     (attribute gather.meta-table)
+                                     mt
                                      (attribute gather.uspace-info)
                                      ext))
                  (~var E<:s (Subtype-Declaration (attribute ops.options)
                                                  unames
                                                  enames
-                                                 (attribute gather.meta-table)))
+                                                 mt))
                  :External-shape) ...)
            (define local-dict
              (for/list ([space (in-list (attribute usr.name))]
@@ -900,13 +862,12 @@ Turn all free non-metavariables into external space names if they are bound.
                                #:unless (hash-has-key? eh (car pair)))
                       pair)))
                  local-dict))
-           (check-externalized stx pre-Γ)
-           ;; TODO: make sure unioned types aren't vaguely shaped,
-           ;; make sure recursion (named or anonymous) is guarded.
+           ;; TODO: make sure recursion (named or anonymous) is guarded.
            (define categorized-and-guarded
                    pre-Γ)
            (define E<: (trans-close (apply set-union ∅ (attribute E<:s.E<:-slice))))
            (printf "external subtypings ~a~%" E<:)
+           (printf "Spaces ~a~%" categorized-and-guarded)
            (Language
             (attribute ops.options) ;; extended already
             (attribute gather.external-spaces) ;; TODO: extend ext
@@ -914,7 +875,7 @@ Turn all free non-metavariables into external space names if they are bound.
             categorized-and-guarded
             (attribute gather.ordered-es)
             E<:
-            (attribute gather.meta-table) ;; TODO: extend ext, check no cross-talk
+            mt ;; TODO: extend ext, check no cross-talk
             (attribute gather.uspace-info))])])])) ;; TODO: extend ext
 
 (define (parse-reduction-relation stx [L (current-language)])

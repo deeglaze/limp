@@ -5,7 +5,8 @@
          racket/pretty
          racket/set
          racket/string racket/trace
-         "common.rkt" "language.rkt" "tast.rkt" "types.rkt" "tc.rkt")
+         "common.rkt" "language.rkt" "tast.rkt" "types.rkt"
+         "tc-common.rkt" "tc.rkt")
 (provide tc-language
          tc-metafunctions
          report-all-errors)
@@ -21,13 +22,15 @@
       (values name τ)))
   ;; Get the checked, general forms of the metafunctions
   (define mfs* (tc-metafunctions metafunctions Ξ))
+  (displayln "Check 1 done")
   (define mfs** (tc-metafunctions mfs* Ξ))
+  (displayln "Check 2 done")
   ;; Populate types of metafunction calls
-  (define rules* (tc-rules #hash() Ξ rules state-τ state-τ 'root '()))
+  (define rules* (tc-rules ⊥eq #hash() Ξ rules state-τ state-τ 'root '()))
   (report-all-errors (append (metafunction-errors mfs*)
                              (metafunction-errors mfs**)
                              rules*))
-  (displayln "Check 1 done")
+  (displayln "Check 1/2 reports done")
   ;; Rewrite (and recheck for good measure) all metafunctions and rules
   ;; to use the monomorphized versions
   (parameterize ([monomorphized (make-hash)]
@@ -40,7 +43,7 @@
     (report-all-errors (tc-metafunctions mfs* Ξ))
     (displayln "Check 2 done")
     ;; When checking the rules, all ecalls will additionally populate monomorphized
-    (define rules* (tc-rules #hash() Ξ rules state-τ state-τ 'root '()))
+    (define rules* (tc-rules ⊥eq #hash() Ξ rules state-τ state-τ 'root '()))
     (displayln "Check 3 done")
     (values rules*
             (append-map hash-values (hash-values (monomorphized))))))
@@ -50,8 +53,8 @@
   (for/list ([mf (in-list mfs)])
     (match-define (Metafunction name τ scoped-rules) mf)
     (match-define-values (names (TArrow: _ dom rng) rules) (open-type-and-rules τ scoped-rules))
-    (displayln (format "Checking ~a" name))
-    (define rules* (tc-rules #hash() Ξ rules dom rng `(def . ,name) '()))
+    (displayln (format "Checking ~a" mf))
+    (define rules* (tc-rules ⊥eq #hash() Ξ rules dom rng `(def . ,name) '()))
     (report-all-errors rules*)
     (displayln "Checked")
     (Metafunction name τ (abstract-frees-in-rules rules* names))))
@@ -93,7 +96,7 @@
 (define (report-pattern-errors pat)
   (err-chk pat)
   (match pat
-    [(or (PAnd _ _ (? list? ps)) (PVariant _ _ _ (? list? ps)))
+    [(PVariant _ _ _ (? list? ps))
      (for-each report-pattern-errors ps)]
     [(or (PMap-with _ _ k v p)
          (PMap-with* _ _ k v p))
@@ -104,7 +107,10 @@
          (PSet-with* _ _ v p))
      (report-pattern-errors v)
      (report-pattern-errors p)]
-    [(PDeref _ _ p _ _) (report-pattern-errors p)]
+    [(or (PDeref _ _ p _ _)
+         (PName _ _ _ p)
+         (PIsType _ _ p))
+     (report-pattern-errors p)]
     [(PTerm _ _ t) (report-term-errors t)]
     [_ (void)]))
 
@@ -177,7 +183,7 @@
     (for/list ([e (in-list (reverse error-list))])
       (with-handlers ([exn:fail:syntax?
                        (λ (e) ((error-display-handler) (exn-message e) e))])
-        (raise-typecheck-error (string-join (err-msg e) "\n") (list (err-stx e))))
+        (raise-typecheck-error (string-join (err-msg e) "\n\n") (list (err-stx e))))
       (err-stx e)))
   (set! error-list null)
   (unless (null? stxs)

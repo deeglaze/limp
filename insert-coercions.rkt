@@ -5,7 +5,7 @@
          "common.rkt"
          "language.rkt"
          "tast.rkt"
-         "types.rkt")
+         "type-formers.rkt" "types.rkt")
 (provide coerce-language)
 
 (define (deheapify-ct ct)
@@ -13,7 +13,7 @@
 
 (define (coerce-pattern pat)
   (define ct (Typed-ct pat))
-  (printf "pattern~%")
+;  (printf "pattern~%")
   (define ct* (deheapify-ct ct))
   (match ct
     [(Deref taddr ct)
@@ -26,8 +26,7 @@
      (match pat
        ;; All implicit dereferences become explicit.
        [(PDeref sy _ p taddr imp) (PDeref sy ct* (coerce-pattern p) taddr #f)]
-       [(PAnd sy _ ps) (PAnd sy ct* (map coerce-pattern ps))]
-       [(PName sy _ x) (PName sy ct* x)]
+       [(PName sy _ x p) (PName sy ct* x (coerce-pattern p))]
        [(PVariant sy _ n ps) (PVariant sy ct* n (map coerce-pattern ps))]
         
        [(or (and (PMap-with sy _ k v p) (app (λ _ PMap-with) ctor))
@@ -38,7 +37,8 @@
             (and (PSet-with* sy _ v p) (app (λ _ PSet-with*) ctor)))
         (ctor sy ct* (coerce-pattern v) (coerce-pattern p))]
 
-       [(or (? PTerm?) (? PWild?) (? PIsExternal?) (? PIsAddr?) (? PIsType?))
+       [(PIsType sy _ p) (PIsType sy ct* (coerce-pattern p))]
+       [(or (? PTerm?) (? PWild?))
         pat]
        [_ (error 'coerce-pattern "Unsupported pattern: ~a" pat)])]))
 
@@ -67,7 +67,7 @@
 (define (do-store e)
   (match e
     [(EHeapify sy ct e* taddr tag)
-     (printf "heapify~%")
+;     (printf "heapify~%")
      (define cτ (deheapify-ct ct))
      (define ctaddr (Check (normalize-taddr taddr)))
      (define x (gensym 'temp))
@@ -78,13 +78,13 @@
      (define-values (bind ref)
        (if (ERef? e-coerced)
            (values '() e-coerced)
-           (values (list (Where sy (PName sy cτ x) e-coerced))
+           (values (list (Where sy (PName sy cτ x (PWild sy cτ)) e-coerced))
                    (ERef sy cτ x))))
      (ELet sy
            ctaddr
            (append bind
                    (list (Where sy
-                         (PName sy ctaddr a)
+                         (PName sy ctaddr a (PWild sy ctaddr))
                          (EAlloc sy ctaddr tag))
                   (Update sy (ERef sy ctaddr a) ref)))
            (ERef sy ctaddr a))]
@@ -123,6 +123,8 @@
                (ELet sy ct* (map coerce-bu bus) (coerce-expr body))]
               [(EMatch sy _ de rules)
                (EMatch sy ct* (coerce-expr de) (map coerce-rule rules))]
+              [(EIf sy _ g th el)
+               (EIf sy ct* (coerce-rule g) (coerce-rule th) (coerce-rule el))]
               [(ESet-union sy _ es)
                (ESet-union sy ct* (map coerce-rule es))]
               [(ESet-intersection sy _ e es)
@@ -137,14 +139,16 @@
                (EMap-has-key sy ct* (coerce-expr m) (coerce-expr k))]
               [(EMap-remove sy _ m k)
                (EMap-remove sy ct* (coerce-expr m) (coerce-expr k))]
-              [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?) (? EUnquote?))
+              [(or (? ERef?) (? EEmpty-Map?) (? EEmpty-Set?) (? EAlloc?) (? EUnquote?) (? EExternal?))
                e]
               [_ (error 'coerce-expr "Unrecognized expression form: ~a" e)])))))
 
 (define (coerce-bu bu)
   (match bu
     [(Where sy p e) (Where sy (coerce-pattern p) (coerce-expr e))]
-    [(Update sy k e) (Update sy (coerce-expr k) (coerce-expr e))]))
+    [(Update sy k e) (Update sy (coerce-expr k) (coerce-expr e))]
+    [(When sy e) (When sy (coerce-expr e))]
+    [(Unless sy e) (Unless sy (coerce-expr e))]))
 
 (define (coerce-rule r)
   (match r

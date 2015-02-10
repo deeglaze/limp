@@ -9,6 +9,7 @@
 (provide (all-defined-out))
 
 (define instantiations (make-parameter #f))
+(define heapifying? (make-parameter #f))
 
 ;; Cast or Check annotations?
 (struct Cast (t) #:transparent)
@@ -64,7 +65,7 @@
           [(TFree: _ x) (ref 'ref$ x)]
           [(TExternal: _ x) (ref 'ext$ x)]
           [(or (and (Tμ: _ x st _ _) (app (λ _ '#:μ) head))
-               (and (TΛ: _ x st) (app (λ _ '#:Λ) head)))
+               (and (TΛ: _ x st _) (app (λ _ '#:Λ) head)))
            `(,head ,x ,(rec (open-scope-hygienically st x)))]
           [(TVariant: _ name ts tr)
            (define base `(ty$ ,name . ,(map rec ts)))
@@ -88,7 +89,7 @@
           [(TArrow: _ dom rng) `(#:-> ,(rec dom) ,(rec rng))]
           [(TBound: _ i) `(deb$ ,i)]
           ;; Non-types
-          [(TUnif τ) `(Unif$ ,(rec τ))]
+          [(TUnif _ τ) `(Unif$ ,(rec τ))]
           [(TError msgs) `(Error . ,msgs)]
           [(THeap: _ taddr tag τ)
            (if (> v 1)
@@ -102,6 +103,10 @@
 
 (define (write-type t port mode)
   (display (type->sexp t) port))
+
+(struct Kind () #:transparent)
+(struct Star Kind () #:transparent)
+(struct K→ Kind (From To) #:transparent)
 
 ;; Type representations are structurally unique by an intern key.
 ;; Various properties are memoized: support, free vars, quality and monomorphic?
@@ -135,10 +140,12 @@
   (define T⊥ (TUnion 1 ∅eq ∅eq 'concrete #t #f '()))
   (hash-set! intern-table '(T⊥) T⊥)
   (define (T⊥? x) (eq? T⊥ x))
+(struct permissive ()) (define Tpermissive (permissive))
 (define-type TVariant (name ts trust)) ;; trust is a Trust-Tag
 (define-type TExternal (name))
 (define-type Tμ (x st tr n)) ;; name for printing
-(define-type TΛ (x st))
+(define-type TΛ (x #;kind st on-app
+                 ))
 (define-type TCut (t u))
 (define-type TName (x)) ;; top level interaction and letrec-like binding
 (define-type TMap (t-dom t-rng ext))
@@ -152,10 +159,11 @@
 (struct Scope (t) #:transparent)
 (define-type TFree (x))
 (define-type TBound (i))
+(define-type TWeak (τ))
 ;; Marked to be heap-allocated when transformed.
 (define-type THeap (taddr tag τ))
 ;; Unification variable
-(struct TUnif ([τ #:mutable])
+(struct TUnif ([tag #:mutable] [τ #:mutable]) #:transparent ;; use tag to make it appear non-transparent for equality.
         #:methods gen:custom-write [(define write-proc write-type)])
 ;; Error placeholder
 (struct TError (msgs) #:transparent
@@ -166,6 +174,11 @@
 (define (*THeap who sy taddr tag τ)
   (when (THeap? τ) (error '*THeap "~a: bad construction ~a" who (list sy taddr tag τ)))
   (mk-THeap sy taddr tag τ))
+
+(define (*TVariant sy n tσ tr)
+  (if (for/or ([σ (in-list tσ)]) (T⊥? σ))
+      T⊥
+      (mk-TVariant sy n tσ tr)))
 
 ;; A Trust-Tag is one of
 ;; - 'untrusted 
@@ -226,13 +239,29 @@
   (match-define (Scope t*) s)
   (open-scope-aux t* 0 t))
 
+(define (combine-taddr t0 t1 on-fail)
+  (match* (t0 t1)
+    [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
+     (define space (⋈flat space0 space1))
+     (define mm (⋈flat mm0 mm1))
+     (define em (⋈flat em0 em1))
+     (if (or (unmapped? space) (unmapped? mm) (unmapped? em))
+         (on-fail t0 t1)
+         (mk-TAddr #f space mm em))]))
+
 ;; If we substituted in a heap allocation under a heap allocation,
 ;; duplicate the type with different allocation tags if they are indeed different.
 (define (combine-THeap sy taddr tag σ)
   (match σ
     [(THeap: _ taddr* tag* τ*)
-     (type-join (*THeap 'combine0 sy tag taddr τ*)
-                (*THeap 'combine1 sy tag taddr* τ*))]
+     (*THeap #f sy tag
+             (combine-taddr taddr taddr*
+                            (λ _ 
+                               (TError sy
+                                       (list (format "~a in heapified type: ~a ~a"
+                                                     "Could not combine addresses"
+                                                     taddr taddr*)))))
+             τ*)]
     [τ* (*THeap 'combine0 sy taddr tag τ*)]))
 
 (define (open-scope-aux t* i t)
@@ -241,7 +270,7 @@
     (match t*
       [(TBound: _ i*) (if (= i i*) t t*)]
       [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (open t (add1 i))) tr n)]
-      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (open t (add1 i))))]
+      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (open t (add1 i))) on-app)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TName?) (? TUnif?) (? TError?)) t*]
       [(? T⊥?) T⊥] ;; don't make another ⊥
@@ -250,10 +279,11 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [(TWeak: sy τ) (mk-TWeak sy (open* τ))]
       [(THeap: sy taddr tag τ) (combine-THeap sy taddr tag (open* τ))]
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
-      [(TUnif τ) (open* τ)]
+      [(TUnif _ τ) (open* τ)]
       [_ (error 'open-scope "Bad type ~a" t*)])))
 
 ;; predictable name generation over gensym.
@@ -269,11 +299,11 @@
           numbered))]
    [else base]))
 
-(define ((name-conflict-res name on-conflict) f sy x t rec)
+(define ((name-conflict-res name on-conflict) f x t rec)
   (cond [(equal? x name)
          (when on-conflict (on-conflict))
-         (f sy (fresh-name (set-add (support t) x) x) (rec t))]
-        [else (f sy x (rec t))]))
+         (f (fresh-name (set-add (support t) x) x) (rec t))]
+        [else (f x (rec t))]))
 
 ;; for correct printing, sometimes clobbering old names
 (define (open-scope-hygienically s name [on-conflict #f])
@@ -284,8 +314,8 @@
     (define (rec t) (Scope (open t (add1 i))))
     (match t*
       [(TBound: sy i*) (if (= i i*) (mk-TFree sy name) t*)]
-      [(Tμ: sy x (Scope t) tr n) (conflict-res (λ (x s) (mk-Tμ x s tr n)) x t rec)]
-      [(TΛ: sy x (Scope t)) (conflict-res mk-TΛ sy x t rec)]
+      [(Tμ: sy x (Scope t) tr n) (conflict-res (λ (x s) (mk-Tμ sy x s tr n)) x t rec)]
+      [(TΛ: sy x (Scope t) on-app) (conflict-res (λ (x s) (mk-TΛ sy x s on-app)) x t rec)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TName?)) t*]
       [(? T⊥?) T⊥] ;; don't make another ⊥
@@ -294,10 +324,12 @@
       [(TCut: sy t u) (mk-TCut sy (open* t) (open* u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (open* t-dom) (open* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (open* t) ext)]
+      [(TWeak: sy τ) (mk-TWeak sy (open* τ))]
       ;; second-class citizens
       [(TArrow: sy d r) (mk-TArrow sy (open* d) (open* r))]
-      [(TUnif τ) (open* τ)]
+      [(TUnif _ τ) (open* τ)]
       [(THeap: sy taddr tag τ) (*THeap 'open-scope-hygienically sy taddr tag (open* τ))]
+      [(? permissive?) t*]
       [_ (error 'open "Bad type ~a" t*)])))
  
 (define (subst-name t name s)
@@ -308,8 +340,8 @@
        (if (equal? x name)
            s
            t)]
-      [(Tμ: sy x (Scope t) tr n) (conflict-res (λ (x s) (mk-Tμ x s tr n)) sy t subst)]
-      [(TΛ: sy x (Scope t)) (conflict-res mk-TΛ sy x t subst)]
+      [(Tμ: sy x (Scope t) tr n) (conflict-res (λ (x s) (mk-Tμ sy x s tr n)) x t subst)]
+      [(TΛ: sy x (Scope t) on-app) (conflict-res (λ (x s) (mk-TΛ sy x s on-app)) x t subst)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TFree?) (? TExternal?) (? TBound?)) t]
       [(? T⊥?) T⊥] ;; don't make another ⊥
@@ -318,7 +350,9 @@
       [(TCut: sy t u) (mk-TCut sy (subst t) (subst u))]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (subst t-dom) (subst t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (subst t) ext)]
+      [(TWeak: sy t) (mk-TWeak sy (subst t))]
       [(THeap: sy taddr tag τ) (combine-THeap sy taddr tag (subst τ))]
+      [(? permissive?) t]
       [_ (error 'subst-name "Bad type ~a" t)])))
 
 (define (abstract-free-aux t i name taddr*)
@@ -336,7 +370,7 @@
                        [else (and (not (eq? taddr* 'trusted)) taddr*)]))
            t)]
       [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (abs t (add1 i))) tr n)]
-      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (abs t (add1 i))))]
+      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (abs t (add1 i))) on-app)]
       ;; boilerplate
       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TUnif?) (? TError?) (? TExternal?)) t]
       [(? T⊥?) T⊥] ;; don't make another ⊥
@@ -345,28 +379,33 @@
       [(TVariant: sy name ts tr) (mk-TVariant sy name (map abs* ts) tr)]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (abs* t-dom) (abs* t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (abs* t) ext)]
+      [(TWeak: sy t) (mk-TWeak sy (abs* t))]
       [(TArrow: sy d r) (mk-TArrow sy (abs* d) (abs* r))]
       [(THeap: sy taddr tag τ) (*THeap 'abstract-free sy taddr tag (abs* τ))]
+      [(? permissive?) t]
       [_ (error 'abstract-free "Bad type ~a" t)])))
 
 (define (abstract-free t name [taddr* #f])
   (Scope (abstract-free-aux t 0 name taddr*)))
 
-(define (uninhabitable? t)
+(define (uninhabitable? t Γ)
   (define us (Language-user-spaces (current-language)))
   (define (rec t guarded? A)
     (define (rec* t) (rec t guarded? A))
     (or (set-member? A t)
         (match t
-          [(TUnif τ) (rec τ guarded? (set-add A t))]
+          [(TUnif _ τ) (rec τ guarded? (set-add A t))]
           [(Tμ: _ x s _ _)
            (rec (open-scope s (mk-TFree #f x)) #f A)]
-          [(TΛ: _ _ s) (rec* (open-scope s T⊤))]
+          [(TΛ: _ _ s _) (rec* (open-scope s T⊤))]
           [(TName: _ x)
            (rec (hash-ref us x)
                 guarded?
                 (set-add A t))]
-          [(? TFree?) (not guarded?)]
+          [(? TFree?) (or (not guarded?) ;; guarded recursive type variable
+                          ;; the variable exists in the environment
+                          (for/or ([τ (in-hash-values Γ)])
+                            (equal? t τ)))]
           [(? TError?) #t]
           [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?)) #f]
           ;; Resimplify, since unification may have bumped some stuff up.
@@ -379,83 +418,74 @@
                     (open (hash-ref us x) (set-add A l) k))]
                [(TCut: _ ll rr)
                 (open ll (λ (A Λs) (k A (open (open-scope Λs rr)))))]
-               [(TΛ: _ _ s) (k A s)]
+               [(TΛ: _ _ s _) (k A s)]
                [t (error 'uninhabitable? "Couldn't resolve ~a" t)]))]
           [(TVariant: sy name ts tr) (for/or ([t (in-list ts)]) (rec t #t A))] ;; *TVariant
           [(? TMap?) #f]
           [(? TSet?) #f]
-          [(THeap: _ _ _ τ) (rec* τ)]
+          [(or (THeap: _ _ _ τ) (TWeak: _ τ)) (rec* τ)]
           [(TArrow: sy dom rng) #f]
           [_ (error 'uninhabitable? "Bad type ~a" t)])))
   (rec t #f ∅eq))
-(trace uninhabitable?)
 
 ;; Remove mutable unification variables.
-(define (freeze t)
-  (match t
-    [(TUnif τ) (freeze τ)]
-    ;; boilerplate
-    [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (freeze t)) tr n)]
-    [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (freeze t)))]
-    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
-    ;; Resimplify, since unification may have bumped some stuff up.
-    [(TUnion: sy ts) (*TUnion sy (map freeze ts))]
-    [(TCut: sy t u) (mk-TCut sy (freeze t) (freeze u))]
-    [(TVariant: sy name ts tr) (mk-TVariant sy name (map freeze ts) tr)] ;; *TVariant
-    [(TMap: sy t-dom t-rng ext) (mk-TMap sy (freeze t-dom) (freeze t-rng) ext)]
-    [(TSet: sy t ext) (mk-TSet sy (freeze t) ext)]
-    [(THeap: sy taddr tag τ) (*THeap 'freeze sy taddr tag (freeze τ))]
-    [(TArrow: sy dom rng) (mk-TArrow sy (freeze dom) (freeze rng))]
-    [_ (error 'freeze "Bad type ~a" t)]))
-
-;; Remove heapification annotations
-(define (unannotate t)
-  (match t
-    [(THeap: _ _ _ τ) (unannotate τ)]
-    ;; boilerplate
-    [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (unannotate t)) tr n)]
-    [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (unannotate t)))]
-    [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
-    ;; Resimplify, since unification may have bumped some stuff up.
-    [(TUnion: sy ts) (*TUnion sy (map unannotate ts))]
-    [(TCut: sy t u) (mk-TCut sy (unannotate t) (unannotate u))]
-    [(TVariant: sy name ts tr) (mk-TVariant sy name (map unannotate ts) tr)] ;; *TVariant
-    [(TMap: sy t-dom t-rng ext) (mk-TMap sy (unannotate t-dom) (unannotate t-rng) ext)]
-    [(TSet: sy t ext) (mk-TSet sy (unannotate t) ext)]
-    [(TArrow: sy dom rng) (mk-TArrow sy (unannotate dom) (unannotate rng))]
-    [_ (error 'unannotate "Bad type ~a" t)]))
-
-;; Change free variables to ⊤
-(define (free->x x t)
-  (let self ([t t])
+(define (freeze t [∪ mk-TUnion])
+  (let rec ([t t])
     (match t
-      [(? TFree?) x]
+      [(TUnif _ τ) (rec τ)]
       ;; boilerplate
-      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (self t)) tr n)]
-      [(TΛ: sy x (Scope t)) (mk-TΛ sy x (Scope (self t)))]
+      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (rec t)) tr n)]
+      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (rec t)) on-app)]
       [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
       ;; Resimplify, since unification may have bumped some stuff up.
-      [(TUnion: sy ts) (*TUnion sy (map self ts))]
+      [(TUnion: sy ts) (∪ sy (map rec ts))]
+      [(TCut: sy t u) (mk-TCut sy (rec t) (rec u))]
+      [(TVariant: sy name ts tr) (*TVariant sy name (map rec ts) tr)] ;; *TVariant
+      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (rec t-dom) (rec t-rng) ext)]
+      [(TSet: sy t ext) (mk-TSet sy (rec t) ext)]
+      [(TWeak: sy t) (mk-TWeak sy (rec t))]
+      [(THeap: sy taddr tag τ) (*THeap 'rec sy taddr tag (rec τ))]
+      [(TArrow: sy dom rng) (mk-TArrow sy (rec dom) (rec rng))]
+      [(? permissive?) t]
+      [_ (error 'freeze "Bad type ~a" t)])))
+
+;; Change free variables to ⊤
+(define (free->x x t #:pred [pred (const #t)] #:∪ [∪ mk-TUnion])
+  (let self ([t t])
+    (match t
+      [(? TFree?) (if (pred t)
+                      x
+                      t)]
+      ;; boilerplate
+      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (self t)) tr n)]
+      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (self t)) on-app)]
+      [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
+      ;; Resimplify, since unification may have bumped some stuff up.
+      [(TUnion: sy ts) (∪ sy (map self ts))]
       [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
       ;; XXX: This must be mk-TVariant and not *TVariant in order to not conflate (foo X) with (bar X)
       [(TVariant: sy name ts tr) (mk-TVariant sy name (map self ts) tr)]
       [(TMap: sy t-dom t-rng ext) (mk-TMap sy (self t-dom) (self t-rng) ext)]
       [(TSet: sy t ext) (mk-TSet sy (self t) ext)]
+      [(TWeak: sy t) (mk-TSet sy (self t))]
       [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (self τ))]
       [(TArrow: sy dom rng) (mk-TArrow sy (self dom) (self rng))]
       [_ (error 'free->x "Bad type ~a" t)])))
 
 (define ff (cons #f #f))
+(define vf (cons values #f))
 ;; Abstract inside-out. Give cosmetic names for better readability and equality checking.
-(define (quantify-frees t names #:names [name-names #f] #:stxs [stxs #f] #:taddrs [taddrs #f])
-  (let rec ([t t] [names names] [nnames (or name-names names)] [stxs stxs] [taddrs taddrs])
+(define (quantify-frees t names #:names [name-names #f] #:OAs [OAs #f] #:stxs [stxs #f] #:taddrs [taddrs #f])
+  (let rec ([t t] [names names] [OAs OAs] [nnames (or name-names names)] [stxs stxs] [taddrs taddrs])
    (match names
      ['() t]
      [(cons name names*)
       (match-define (cons name-name name-names*) nnames)
       (match-define (cons stx0 stxs*) (or stxs ff))
       (match-define (cons taddr taddrs*) (or taddrs ff))
-      (rec (mk-TΛ stx0 name-name (abstract-free t name taddr)) names* name-names* stxs* taddrs*)]
+      (match-define (cons oa OAs*) (or OAs vf))
+      (rec (mk-TΛ stx0 name-name (abstract-free t name taddr) oa)
+           names* OAs* name-names* stxs* taddrs*)]
      [_ (error 'quantify-frees "Expected a list of names ~a" names)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -468,10 +498,10 @@
                   [(or (TUnion: _ ts)  (TVariant: _ _ ts _)
                        (app (match-lambda [(or (TMap: _ d r _) (TCut: _ d r)) (list d r)] [_ '()]) ts)
                        (app (match-lambda [(TSet: _ s _) (list s)] [_ '()]) ts)
-                       (app (match-lambda [(THeap: _ _ _ τ) (list τ)] [_ '()]) ts))
+                       (app (match-lambda [(or (THeap: _ _ _ τ) (TWeak: _ τ)) (list τ)] [_ '()]) ts))
                    (for/union ([t (in-list ts)]) (support t))]
                   [(or (TFree: _ x) (TName: _ x)) (seteq x)]
-                  [(or (Tμ: _ x (Scope t) _ _) (TΛ: _ x (Scope t)))
+                  [(or (Tμ: _ x (Scope t) _ _) (TΛ: _ x (Scope t) _))
                    (set-add (support t) x)]
                   [_ ∅eq])])
         (set-Type-support! t t*)
@@ -487,9 +517,10 @@
                   ;; TName and TExternal are bound by language
                   [(or (TFree: _ x)) (seteq x)]
                   [(or (Tμ: _ _ (Scope t) _ _)
-                       (TΛ: _ _ (Scope t))
+                       (TΛ: _ _ (Scope t) _)
                        (TSet: _ t _)
-                       (THeap: _ _ _ t))
+                       (THeap: _ _ _ t)
+                       (TWeak: _ t))
                    (free t)]
                   [_ ∅eq])])
         (set-Type-free! t t*)
@@ -504,52 +535,52 @@
      (set-union (names-mentioned d) (names-mentioned r))]
     [(TName: _ x) (seteq x)]
     [(or (Tμ: _ _ (Scope t) _ _)
-         (TΛ: _ _ (Scope t))
+         (TΛ: _ _ (Scope t) _)
          (TSet: _ t _)
-         (THeap: _ _ _ t))
+         (THeap: _ _ _ t)
+         (TWeak: _ t))
      (names-mentioned t)]
     [_ ∅eq]))
 
 (define (mono-type? t)
-  (define m (Type-mono? t))
-  (cond
-   [(eq? m 'unset)
-    (define b
-      (let coind ([A ∅eq] [t t])
-        (define m (Type-mono? t))
+  (define (coind A t)
+    (define m (Type-mono? t))
+    (cond
+     [(eq? m 'unset)
+      (define res
         (cond
-         [(eq? m 'unset)
+         [(set-member? A t) A]
+         [else
+          (define A* (set-add A t))
           (match t
             [(TUnion: _ ts)
-             (andmap ((curry coind) A) ts)]
+             (andmap ((curry coind) A*) ts)]
             [(TMap: _ d r _)
-             (and (coind A d) (coind A r))]
+             (and (coind A* d) (coind A* r))]
             [(TVariant: _ _ ts _)
-             (let all ([A A] [ts ts])
+             (let all ([A A*] [ts ts])
                (match ts
                  ['() A]
                  [(cons t ts)
                   (define A* (coind A t))
                   (and A* (all A* ts))]))]
             [(or (Tμ: _ _ (Scope t) _ _)  (TSet: _ t _))
-             (coind A t)]
+             (coind A* t)]
             [(or (? TΛ?) (? TFree?)) #f]
             [(? needs-resolve?)
-             (if (set-member? A t) ;; already looked up name and haven't failed yet.
-                 A
-                 (coind (set-add A t) (resolve t)))]
-            [(THeap: _ _ _ τ) (coind A τ)]
-            [_ A])]
-         [else (and m A)])))
-    (set-Type-mono?! t b)
-    b]
-   [else m]))
+             (coind A* (resolve t))]
+            [(or (THeap: _ _ _ τ) (TWeak: _ τ)) (coind A* τ)]
+            [_ A*])]))
+      (set-Type-mono?! t (not (not res)))
+      res]
+     [else (and m A)]))
+  (coind ∅ t))
 
 (define (type-contains? ty inner)
   (let search ([ty ty])
     (or (eq? ty inner)
         (match ty
-          [(or (TΛ: _ _ (Scope t)) (Tμ: _ _ (Scope t) _ _)) (search t)]
+          [(or (TΛ: _ _ (Scope t) _) (Tμ: _ _ (Scope t) _ _)) (search t)]
           ;; boilerplate
           [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?)) #f]
           [(or (TUnion: _ ts) (TVariant: _ _ ts _)) (ormap search ts)]
@@ -563,56 +594,6 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Other type operations
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(define (flatten-unions-in-list ts)
-  (append-map
-   (λ (t)
-      (match t
-        [(TUnion: _ ts*)
-         (flatten-unions-in-list ts*)]
-        [_ (list t)]))
-   ts))
-
-;; Only incomparable types should be represented in a union.
-;; When a type subsumes another, we remove the subsumed type.
-(define (remove-subtypes ts)
-  (let rec ([ts ts] [rev-ts* '()])
-   (match ts
-     ['() rev-ts*]
-     [(cons t ts)
-      ;; If t is subtyped in the rest of the list, drop it.
-      ;; If t was supertyped by a previous type, drop it.
-      (cond [(or (for/or ([s (in-list ts)]) (<:? t s))
-                 (for/or ([s (in-list rev-ts*)]) (<:? t s)))
-             (rec ts rev-ts*)]
-            [else (rec ts (cons t rev-ts*))])])))
-
-;; Canonicalize a list of types to forbid disequal but equivalent types.
-(define (simplify-types U ts)
-  (sort-union U ts remove-subtypes))
-
-(define (sort-union U ts [post values])
-  (match (post (remove-sorted-dups
-                (sort (flatten-unions-in-list ts) < #:key Type-key)))
-    [(list t) t]
-    ['() T⊥]
-    [ts (U ts)]))
-
-(define (sort-TUnion sy ts) (sort-union (λ (ts) (mk-TUnion sy ts)) ts))
-
-;; reverses, but it's still canonically sorted.
-(define (remove-sorted-dups ts) ;; assumes #f not the first element of list.
-  (let loop ([ts ts] [last #f] [new '()])
-    (match ts
-      ['() new]
-      [(cons t ts)
-       (if (equal? t last)
-           (loop ts last new)
-           (loop ts t (cons t new)))]
-      [_ (error 'loop "Expected a list of types ~a" ts)])))
-(define (*TUnion sy ts)
-  (unless (list? ts) (error '*TUnion "WAT"))
-  (simplify-types ((curry mk-TUnion) sy) ts))
 
 (define (needs-resolve? τ)
   (or (TName? τ) (Tμ? τ) (TCut? τ) (TUnif? τ)
@@ -632,9 +613,9 @@
 (define limp-default-⊤-addr limp-default-Λ-addr)
 
 ;; resolve : Type Map[Name,Type] -> Maybe[Type]
-(define (resolve t [extra-Γ #f] #:addrize [rec-spaces (const #f)])
+(define (resolve t #:addrize [rec-spaces (const #f)])
   (define Γ (Language-user-spaces (current-language)))
-  (define Γcount (+ (hash-count Γ) (if extra-Γ (hash-count extra-Γ) 0)))
+  (define Γcount (hash-count Γ))
   (define orig t)
   (let reset ([t t])
     (let fuel ([t t] [i (add1 Γcount)])
@@ -643,12 +624,10 @@
             [(TName: sy x)
              (match (rec-spaces x)
                [#f
-                (match (hash-ref Γ x #f)
+                (match (hash-ref Γ x #f) ;; FIXME: paired names with types
                   [#f
-                   (unless extra-Γ
-                     (error 'resolve "Missing extra context for ~a [~a, ~a]" x
-                            (struct->vector orig) Γ))
-                   (mk-TName sy (hash-ref extra-Γ x))]
+                   (error 'resolve "Missing extra context for ~a [~a, ~a]" x
+                          (struct->vector orig) Γ)]
                   [τ (fuel τ (sub1 i))])]
                [#t limp-default-Λ-addr]
                [bad (error 'resolve "Unexpected rec ~a" bad)])]
@@ -658,14 +637,16 @@
              (fuel (open-scope st t) (sub1 i))]
             [(TCut: _ t* u)
              (match (reset t*)
-               [(and (TΛ: _ _ st) lam)
-                ;; Record the type instantiations for later transformations.
+               [(and (TΛ: _ _ st on-app) lam)
                 (define u* (reset u))
+                ;; Record the type instantiations for later transformations.
                 (define inst (instantiations))
-                (when (and inst (mono-type? u*)) (hash-add! inst lam u*))
-                (reset (open-scope st u))]
+                (when (and inst (not (permissive? u*)) (mono-type? u*))
+                  (hash-add! inst lam u*))
+                (define applied (open-scope st u))
+                (reset (if (heapifying?) (on-app applied) applied))]
                [_ (error 'resolve "Expected a type abstraction at ~a: got ~a" t t*)])]
-            [(TUnif τ) (reset τ)]
+            [(TUnif _ τ) (reset τ)]
             [(THeap: sy taddr tag τ) (*THeap 'resolve sy taddr tag (reset τ))]
             [_ t])
           (error 'resolve "Circular reference: ~a" orig)))))
@@ -678,437 +659,13 @@
      (let* ([A more0])
        (and A
             (seq A . more)))]))
-
-;; The TAPL approach to equirecursive subtyping.
-;; Uses language axioms for external subtyping.
-(define (<:? τ σ [ρ #f])
-  (define L (current-language))
-  ((<:?-aux (Language-E<: L) ρ) ∅ τ σ))
-
-;(trace <:?)
-
-(define ((<:?-aux E<: ρ) A τ σ)
-  (define (<:?-aux A τ σ)
-    (define (grow-A) (set-add A (cons τ σ)))
-    (cond
-     [(or (equal? τ σ)
-          (set-member? A (cons τ σ))
-          (TError? τ)
-          (TError? σ)) A]
-     [else
-      (match* (τ σ)
-        [(_ (? T⊤?)) A]
-        [((? T⊥?) _) A]
-        [((? needs-resolve?) _)
-         (<:?-aux (grow-A) (resolve τ ρ) σ)]
-        [(_ (? needs-resolve?))
-         (<:?-aux (grow-A) τ (resolve σ ρ))]
-        [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
-         (and (not (unmapped? (⋈flat tag0 tag1)))
-              (seq A
-                   (<:?-aux A taddr0 taddr1)
-                   (<:?-aux A τ σ)))]
-        ;; No implicit casts from heap/non-heap
-        [((TUnion: _ ts) _)
-         (and (for/and ([t (in-list ts)])
-                (<:?-aux A t σ))
-              A)]
-        [(_ (TUnion: _ σs))
-         (and (for/or ([σ (in-list σs)])
-                (<:?-aux A τ σ))
-              A)]
-        [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
-         (and (not (or (unmapped? (⋈flat space0 space1))
-                       (unmapped? (⋈flat mm0 mm1))
-                       (unmapped? (⋈flat em0 em1))))
-              A)]
-        [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
-         #:when (implies (and tr0 tr1) (equal? tr0 tr1))
-         (let each ([A (grow-A)] [τs τs] [σs σs])
-           (match* (τs σs)
-             [('() '()) A]
-             [((cons τ τs) (cons σ σs))
-              (seq A (<:?-aux A τ σ) (each A τs σs))]
-             [(_ _) #f]))]
-        [((TSet: _ τ lext) (TSet: _ σ rext))
-         (and
-          (or (equal? lext rext)
-              (eq? lext 'dc)
-              (eq? rext 'dc))
-          (<:?-aux A τ σ))]
-        [((TMap: _ τk τv lext) (TMap: _ σk σv rext))
-         (and (or (equal? lext rext)
-                  (eq? lext 'dc)
-                  (eq? rext 'dc))
-          (seq A
-               (<:?-aux A τk σk)
-               (<:?-aux A τv σv)))]
-        [((TΛ: _ _ sτ) (TΛ: _ _ sσ))
-         (define name (mk-TFree #f (gensym 'dummy)))
-         (<:?-aux A (open-scope sτ name) (open-scope sσ name))]
-        [(_ (TExternal: _ name)) (and (set-member? E<: (cons τ name)) A)]
-        [(_ _) #f])]))
-  (<:?-aux A τ σ))
-
+ 
 ;; If both are set, then they must be the same.
 ;; If not, we use the default
 (define (mode-comb m0 m1)
   (if (implies (and m0 m1) (eq? m0 m1))
       (or m0 m1)
       'default))
-
-(define (type-join-aux us seen)
-  (define (⊔ τ σ ρ)
-    (define (join-named x σ)
-      (match (hash-ref ρ x #f)
-        [#f (define x* (gensym x))
-            (hash-set! us x* T⊥)
-            (define τσ (⊔ (hash-ref us x) σ (hash-set ρ x x*)))
-            (hash-set! us x* τσ)
-            τσ]
-        [y (⊔ (mk-TName #f y) σ ρ)]))
-    (define (unify τ σ)
-      (cond
-       [(type-contains? σ τ)
-        (TError (list "Cyclic unification"))]
-       [else
-        (define out (⊔ (TUnif-τ τ) σ ρ))
-        (set-TUnif-τ! τ out)
-        τ]))
-    (cond
-     [(and (TError? τ) (TError? σ))
-      (TError (append (TError-msgs τ) (TError-msgs σ)))]
-     ;; If comparable, choose the larger type without allocating new type structure.
-     [(<:? τ σ ρ) σ]
-     [(<:? σ τ ρ) τ]
-     [else
-      (match* (τ σ)
-        [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
-         #:when (and (= (length τs) (length σs))
-                     (implies (and tr0 tr1) (equal? tr0 tr1)))
-         (mk-TVariant #f n (for/list ([τ (in-list τs)]
-                                      [σ (in-list σs)])
-                             (⊔ τ σ ρ))
-                      (⊔trust tr1 tr0))]
-        ;; Make Λs agree on a name and abstract the result.
-        [((TΛ: _ x st) (TΛ: _ _ ss))
-         (define fresh (gensym 'joinΛ))
-         (define tv (mk-TFree #f fresh))
-         (mk-TΛ #f x
-                (abstract-free (⊔ (open-scope st tv)
-                                  (open-scope ss tv)
-                                  ρ)
-                               fresh))]
-        ;; If not an abstraction, unify.
-        [((TΛ: _ x st) _) (⊔ (open-scope st (TUnif T⊥)) σ ρ)]
-        [(_ (TΛ: _ x ss)) (⊔ τ (open-scope ss (TUnif T⊥)) ρ)]
-        [((? TUnif?) _) (unify τ σ)]
-        [(_ (? TUnif?)) (unify σ τ)]
-        ;; distribute unions
-        [((TUnion: _ ts) _)
-         (*TUnion #f (for/list ([t (in-list ts)])
-                        (⊔ t σ ρ)))]
-        [(_ (TUnion: _ ts))
-         (*TUnion #f (for/list ([t (in-list ts)])
-                        (⊔ τ t ρ)))]
-        ;; map and set are structural
-        [((TMap: _ fd fr fext) (TMap: _ td tr text))
-         (mk-TMap #f
-                  (⊔ fd td ρ)
-                  (⊔ fr tr ρ)
-                  (⊔b fext text))]
-        [((TSet: _ t fext) (TSet: _ s text))
-         (mk-TSet (⊔ t s ρ) (⊔b fext text))]
-        ;; The join of two recursive types requires them agreeing on their variable.
-        [((Tμ: _ x sτ ftr fn) (Tμ: _ _ sσ ttr tn))
-         (define fresh (gensym 'joinμ))
-         (define tv (mk-TFree #f fresh))
-         (mk-Tμ #f x
-                (abstract-free (⊔ (open-scope sτ tv) (open-scope sσ tv) ρ) fresh)
-                (⊔trust ftr ttr)
-                (min fn tn))]
-        ;; Named types are like recursive types, but trickier to get the name agreement right.
-        [((TName: _ x) _) (join-named x σ)]
-        [(_ (TName: _ x)) (join-named x τ)]
-        [((? TCut?) _)
-         (define pair (cons τ σ))
-         (cond [(set-member? seen pair)
-                T⊤]
-               [else
-                (set-add! seen pair)
-                (⊔ (resolve τ ρ) σ ρ)])]
-        [(_ (? TCut?))
-         (define pair (cons τ σ))
-         (cond [(set-member? seen pair)
-                T⊤]
-               [else
-                (set-add! seen pair)
-                (⊔ τ (resolve σ ρ) ρ)])]
-        ;; Maintain invariant that heap allocation annotations are only one deep.
-        [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
-         (define (both)
-           (mk-TUnion #f (list (*THeap 'join-theap0 #f taddr0 tag0 τ)
-                                (*THeap 'join-theap1 #f taddr1 tag1 σ))))
-         (match (⊔ taddr0 taddr1 ρ)
-           [(? TUnion?) (both)]
-           [(? TAddr? ta)
-            (define tag (⋈flat tag0 tag1))
-            (if (unmapped? tag)
-                (both)
-                (*THeap 'join-theap #f ta tag (⊔ τ σ ρ)))]
-           [bad (error 'type-join "Non-TAddr join? ~a ~a => ~a" taddr0 taddr1 bad)])]
-        [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
-         (define space (⋈flat space0 space1))
-         (define mm (⋈flat mm0 mm1))
-         (define em (⋈flat em0 em1))
-         (if (or (unmapped? space) (unmapped? mm) (unmapped? em))
-             (*TUnion #f (list τ σ))
-             (mk-TAddr #f space mm em))]
-        [(_ _) (*TUnion #f (list τ σ))])]))
-  ⊔)
-(define (type-join τ σ)  
-  (define ⊔seen (mutable-set))
-  (freeze ((type-join-aux (Language-user-spaces (current-language)) ⊔seen) τ σ #hasheq())))
-
-(define (type-join* τs [ρ #hasheq()] #:seen [⊔seen (mutable-set)] #:no-freeze? [no-freeze? #f])
-  (define tj (type-join-aux (Language-user-spaces (current-language)) ⊔seen))
-  (define (rec τs acc)
-    (match τs
-      ['() (if no-freeze? acc (freeze acc))]
-      [(cons τ τs*) (rec τs* (tj τ acc ρ))]))
-  (rec τs T⊥))
-
-;(trace type-join*)
-
-;; Doesn't freeze afterwards
-(define (type-meet-aux us ⊓seen ⊔seen)
-  (define (⊓ τ σ ρ)
-    (define (meet-named x σ)
-      (match (hash-ref ρ x #f)
-        [#f (define x* (gensym x))
-            (hash-set! us x* T⊥)
-            (define τσ (⊓ (hash-ref us x) σ (hash-set ρ x x*)))
-            (hash-set! us x* τσ)
-            τσ]
-        [y
-         (⊓ (mk-TName #f y) σ ρ)]))
-    (define (unify τ σ)
-      (define out (⊓ (TUnif-τ τ) σ ρ))
-      (set-TUnif-τ! τ out)
-      τ)
-   (cond
-    [(and (TError? τ) (TError? σ))
-     (TError (append (TError-msgs τ) (TError-msgs σ)))]
-    ;; XXX: Can't use <:? to short-cut since it doesn't fill in unknowns!
-    [(equal? τ σ) τ]
-    [else
-     (match* (τ σ)
-       [((? T⊤?) _) σ]
-       [(_ (? T⊤?)) τ]
-       [((? T⊥?) _) T⊥]
-       [(_ (? T⊥?)) T⊥]
-       [((TVariant: _ n τs tr0) (TVariant: _ n σs tr1))
-        #:when (and (= (length τs) (length σs))
-                    (implies (and tr0 tr1) (equal? tr0 tr1)))
-        (mk-TVariant #f n (for/list ([τ (in-list τs)] ;; *TVariant
-                                   [σ (in-list σs)])
-                            (⊓ τ σ ρ))
-                     (⊓trust tr1 tr0))]
-       ;; Make Λs agree on a name and abstract the result.
-       [((TΛ: _ x st) (TΛ: _ _ ss))
-        (define fresh (gensym 'joinΛ))
-        (define tv (mk-TFree #f fresh))
-        (mk-TΛ #f x
-               (abstract-free (⊓ (open-scope st tv)
-                                 (open-scope ss tv)
-                                 ρ)
-                              fresh))]
-       ;; If not both abstractions, start at ⊤ and narrow.
-       [((TΛ: _ _ st) _) (⊓ (open-scope st (TUnif T⊤)) σ ρ)]
-       [(_ (TΛ: _ _ ss)) (⊓ τ (open-scope ss (TUnif T⊤)) ρ)]
-       [((? TUnif?) _) (unify τ σ)]
-       [(_ (? TUnif?)) (unify σ τ)]
-       ;; distribute unions
-       [((TUnion: _ ts) _)
-        (type-join* (for/list ([t (in-list ts)])
-                       (⊓ t σ ρ))
-                    ρ
-                    #:seen ⊔seen
-                    #:no-freeze? #t)]
-       [(_ (TUnion: _ ts))
-        (type-join* (for/list ([t (in-list ts)])
-                      (⊓ τ t ρ))
-                    ρ
-                    #:seen ⊔seen
-                    #:no-freeze? #t)]
-       ;; map and set are structural
-       [((TMap: _ fd fr fext) (TMap: _ td tr text))
-        (mk-TMap #f (⊓ fd td ρ)
-                 (⊓ fr tr ρ)
-                 (⊓b fext text))]
-       [((TSet: _ t fext) (TSet: _ s text))
-        (mk-TSet #f (⊓ t s ρ) (⊓b fext text))]
-       ;; The join of two recursive types requires them agreeing on their variable.
-       [((Tμ: _ x sτ ftr fn) (Tμ: _ _ sσ ttr tn))
-        (define fresh (gensym 'joinμ))
-        (define tv (mk-TFree #f fresh))
-        (mk-Tμ #f x
-               (abstract-free
-                (⊓
-                 (open-scope sτ tv)
-                 (open-scope sσ tv)
-                 ρ)
-                fresh)
-               (⊓trust ftr ttr)
-               (min fn tn))]
-       ;; Named types are like recursive types, but trickier to get the name agreement right.
-       [((TName: _ x) _) (meet-named x σ)]
-       [(_ (TName: _ x)) (meet-named x τ)]
-       [((? TCut?) _) 
-        (define pair (cons τ σ))
-        (cond [(set-member? ⊓seen pair)
-               T⊥]
-              [else
-               (set-add! ⊓seen pair)
-               (⊓ (resolve τ ρ) σ ρ)])]
-       [(_ (? TCut?))
-        (define pair (cons τ σ))
-        (cond [(set-member? ⊓seen pair)
-               T⊥]
-              [else
-               (set-add! ⊓seen pair)
-               (⊓ τ (resolve σ ρ) ρ)])]
-       [((THeap: _ taddr0 tag0 τ) (THeap: _ taddr1 tag1 σ))
-         (match (⊓ taddr0 taddr1 ρ)
-           [(? TAddr? ta)
-            (define inner (⊓ τ σ ρ))
-            (define tag (⋈flat tag0 tag1))
-            (if (or (T⊥? inner) (unmapped? tag))
-                T⊥ ;; XXX: don't heap-allocate bottom?
-                (*THeap 'meet-theap #f ta tag inner))]
-           [(? T⊥?) T⊥]
-           [bad (error 'type-meet "Non-TAddr meet? ~a ~a => ~a" taddr0 taddr1 bad)])]
-       [((TAddr: _ space0 mm0 em0) (TAddr: _ space1 mm1 em1))
-         (define space (⋈flat space0 space1))
-         (define mm (⋈flat mm0 mm1))
-         (define em (⋈flat em0 em1))
-         (if (or (unmapped? space) (unmapped? mm) (unmapped? em))
-             T⊥
-             (mk-TAddr #f space mm em))]
-       [(_ _)
-        (unless (and τ σ) (error 'type-meet "Bad type ~a ~a" τ σ))
-        T⊥])]))
-;  (trace ⊓)
-  ⊓)
-
-
-(define (type-meet τ σ)
-  (define res (freeze ((type-meet-aux (Language-user-spaces (current-language))
-                                      (mutable-set) (mutable-set))
-                       τ σ #hasheq())))
-  (when (T⊥? res)
-    (printf "Meet ⊥: ~a, ~a~%" τ σ))
-  res)
-(trace type-meet)
-
-;; τ is castable to σ if τ <: σ, τ = ⊤,
-;; or structural components of τ are castable to structural components of σ.
-(define (castable from to)
-  (define (check A from to)
-    (if (or
-         (<:? from to) ;; upcast
-         (<:? to from)) ;; strict downcast
-        A
-        ;; Structurally castable?
-        (match* (from to)
-          [((TΛ: _ _ (Scope f)) (TΛ: _ _ (Scope t)))
-           (check A f t)]
-          [((TVariant: _ n tsf tr0) (TVariant: _ n tst tr1))
-           #:when (implies (and tr0 tr1) (equal? tr0 tr1))
-           (let all ([A A] [tsf tsf] [tst tst])
-             (match* (tsf tst)
-               [('() '()) A]
-               [((cons f tsf) (cons t tst))
-                (seq A (check A f t) (all A tsf tst))]
-               [(_ _) #f]))]
-          [((Tμ: _ _ (Scope f) tr n) (Tμ: _ _ (Scope t) tr n))
-           (check A f t)]
-          [((TMap: _ df rf ext) (TMap: _ dt rt ext))
-           (seq (check A df dt)
-                (check A rf rt))]
-          [((TSet: _ f ext) (TSet: _ t ext)) (check A f t)]
-          [((TUnion: _ tsf) _)
-           (for/fold ([A A]) ([tf (in-list tsf)]
-                              #:when A)
-             (check A tf to))]
-          [(_ (TUnion: _ tst))
-           ;; Don't save false paths
-           (for/or ([tt (in-list tst)]) (check A from tt))]
-          ;; XXX: Will this possibly diverge?
-          [((and (not (? Tμ?)) (? needs-resolve?)) _)
-           (if (set-member? A (cons from to))
-               A
-               (check (set-add A (cons from to))
-                      (resolve from) to))]
-          [(_ (and (not (? Tμ?)) (? needs-resolve?)))
-           (if (set-member? A (cons from to))
-               A
-               (check (set-add A (cons from to))
-                      from (resolve to)))]
-          [(_ _) #f])))
-  (and (check ∅ from to) #t))
-
-(define (cast-to from to)
-  (cond
-   [(<:? from to) (Check to)] ;; upcast -> check, not cast
-   [(castable from to) (Cast to)]
-   [else (type-error "Could not cast ~a to ~a" from to)]))
-
-;; Find all instances of variants named n with given arity, and return
-;; their type, additionally quantified by all the containing Λs.
-(define (lang-variants-of-arity upper-bound)
-  (define us (Language-ordered-us (current-language)))
-  (define seen (mutable-seteq))
-  (define more-upper (free->x T⊤ upper-bound))
-  (reverse
-   (for/fold ([found '()])
-       ([nu (in-list us)])
-     (define τ (cdr nu))
-     (define (collect τ TVs Name-TVs found)
-       (define (collect* τs found)
-         (match τs
-           ['() found]
-           [(cons τ τs)
-            (define found* (collect τ TVs Name-TVs found))
-            (collect* τs found*)]
-           [_ (error 'collect* "Expected a list of types: ~a" τs)]))
-       (cond
-        [(set-member? seen τ) found]
-        [else
-         (set-add! seen τ)
-         (match τ
-           [(TVariant: _ n* ts tr)
-            (define found*
-              (if (<:? (free->x T⊥ τ) more-upper) 
-                  (begin (printf "Granted ~a, ~a~%" τ upper-bound)
-                   (cons (quantify-frees τ TVs #:names Name-TVs) found))
-                  found))
-            (collect* ts found*)]
-           [(TΛ: _ x s)
-            (define x* (gensym x))
-            (define TVs* (cons x* TVs))
-            (collect (open-scope s (mk-TFree #f x*)) TVs* (cons x Name-TVs) found)]
-           [(TName: _ x)
-            found]
-           [(Tμ: _ x s tr n)
-            (collect (open-scope s (mk-TFree #f (gensym x))) TVs Name-TVs found)]
-           [(? needs-resolve?) (collect (resolve τ) TVs Name-TVs found)]
-           [(TMap: _ d r _)
-            (collect r TVs Name-TVs (collect d TVs Name-TVs found))]
-           [(or (TSet: _ v _) (THeap: _ _ _ v)) (collect v TVs Name-TVs found)]
-           [(TUnion: _ ts) (collect* ts found)]
-           [_ found])]))
-     (collect τ '() '() found))))
 
 ;; Repeatedly instantiate σ's Λs with τs until τs is empty.
 ;; If τs not empty before σ is not a Λ, then invoke on-too-many.
@@ -1119,15 +676,15 @@
     (match τs
       [(cons τ τs)
        (match (resolve σ)
-         [(TΛ: _ x s)
-          (loop (open-scope s τ) τs)]
+         [(TΛ: _ x s oa)
+          (loop (oa (open-scope s τ)) τs)]
          [_ (on-too-many)])]
       [_ σ])))
 
 (define (num-top-level-Λs τ)
   (let count ([τ τ] [i 0])
    (match (resolve τ)
-     [(TΛ: _ _ (Scope σ)) (count σ (add1 i))]
+     [(TΛ: _ _ (Scope σ) _) (count σ (add1 i))]
      [_ i])))
 
 ;; Create unification variables for implicit types.
@@ -1136,12 +693,14 @@
   (define τs*
     (if (list? τs)
         (for/list ([τ (in-list τs)])
-          (or τ (TUnif T⊤)))
-        (build-list (num-top-level-Λs τ) (λ _ (TUnif T⊤)))))
+          (or τ (TUnif (gensym) T⊤)))
+        (build-list (num-top-level-Λs τ) (λ _ (TUnif (gensym) T⊤)))))
   (define possible-out (repeat-inst τ τs*))
-  (if (TΛ? (resolve possible-out))
-      (values #f #f) ;; should be fully instantiated
-      (values (map freeze τs*) (freeze possible-out))))
+  (cond
+   [(or (not possible-out) (TΛ? (resolve possible-out)))
+    (values #f #f)] ;; should be fully instantiated
+   [else
+    (values (map freeze τs*) (freeze possible-out))]))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.
@@ -1158,7 +717,7 @@
   (match t
     [(or (? T⊤?) (? TAddr?) (? TBound?) (? TExternal?) (? TName?) (? TError?)) #t]
     [(? TFree?) #f]
-    [(or (Tμ: _ _ (Scope t) _ _) (TΛ: _ _ (Scope t)) (TSet: _ t _))
+    [(or (Tμ: _ _ (Scope t) _ _) (TΛ: _ _ (Scope t) _) (TSet: _ t _))
      (no-free? t)]
     ;; boilerplate
     [(or (TUnion: _ ts)  (TVariant: _ _ ts _))
@@ -1166,81 +725,3 @@
     [(or (TMap: _ t0 t1 _) (TCut: _ t0 t1))
      (and (no-free? t0) (no-free? t1))]
     [_ (error 'no-free? "Bad type: ~a" t)]))
-
-;; check-path-productive : Type Type (any -> ⊥) -> (void)
-;; (void) iff endpoint unreachable from t. Otherwise break invoked with #f.
-(define (check-path-productive t endpoint break)
-  (let search ([t t])
-    (when (eq? t endpoint) (break #f))
-    (match t
-      [(or (TΛ: _ _ (Scope t)) (Tμ: _ _ (Scope t) _ _)) (search t)]
-      [(TUnion: _ ts) (for-each search ts)]
-      [_ (void)])))
-
-;; vaguely-shaped? : Listof[Type] -> Boolean
-;; #f iff all types are not vaguely shaped.
-;; Shape vagueries are
-;; - free names
-;; - same name/arity variants
-;; - more than one map or set
-(define (vaguely-shaped? ts)
-  (define name-arities (mutable-set))
-  (let/ec break
-   (for/fold ([map? #f] [set? #f])
-       ([t (in-list ts)])
-     (match t
-       [(? TMap?)
-        (when map? (break #t))
-        (values #t set?)]
-       [(? TSet?)
-        (when set? (break #t))
-        (values map? #t)]
-       [(? TFree?) (break #t)]
-       [(TVariant: _ name ts _)
-        (define n-arity (cons name (length ts)))
-        (cond
-         [(set-member? name-arities n-arity) (break #t)]
-         [else (set-add! name-arities n-arity)
-               (values map? set?)])]
-       [_ (values map? set?)]))
-   #f))
-
-;; Unroll all types and mark where the unrolling was
-
-;; check-productive-and-classify-unions : Type Boolean -> (U #f Type)
-;; Simplifies unions and classifies them as raw or shapely.
-;; If ar? is #f, then the result is #f if any raw unions are detected.
-;; If the type has an unguarded recursive type variable, then the result is #f.
-(define (check-productive-and-classify-unions t ar?)
-  (let/ec break
-    (let loop ([t t] [unrolled ∅eq])
-      (define (loop* t) (loop t unrolled))
-      (match t
-        [(TΛ: sy x st) ;; XXX: TFree taddr should be #f or...?
-         (mk-TΛ sy x (abstract-free (loop (open-scope st (mk-TFree #f x)) unrolled) x))]
-        [(Tμ: sy x st tr n)
-         (cond
-          [(set-member? unrolled t)
-           ;; It's been unfolded once. We won't unfold more than that.
-           (loop (open-scope st (mk-TFree sy x)) unrolled)]
-          [else
-           (define opened (open-scope st t))
-           (check-path-productive opened t break) ;; uses pointer equality
-           (mk-Tμ sy x (abstract-free (loop opened (set-add unrolled t)) x) tr n)])]
-        [(TName: sy x)
-         (cond
-          [(set-member? unrolled x) t]
-          [else (loop (hash-ref (Language-user-spaces (current-language))
-                                x (λ () (error 'check-path-productive "Unbound name ~a" x)))
-                      (set-add unrolled x))])]
-        [(TUnion: sy ts)
-         (define ts* (map loop* ts))
-         (define ts** (flatten-unions-in-list ts*))
-         (*TUnion sy ts**)]
-        [(TVariant: sy n ts tr)
-         (mk-TVariant sy n (map loop* ts) tr)]
-        [(TMap: sy t-dom t-rng ext)
-         (mk-TMap sy (loop* t-dom) (loop* t-rng) ext)]
-        [(TSet: sy t ext)
-         (mk-TSet sy (loop* t) ext)]
-        [_ t]))))

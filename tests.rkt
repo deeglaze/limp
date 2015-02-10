@@ -19,12 +19,12 @@
          "types.rkt")
 
 ;; If there are any time or space leaks, kill the tests.
-(with-limits 40 1024
+(with-limits 120 2048
 
 (type-print-verbosity 2)
-(pattern-print-verbosity 3)
-(expr-print-verbosity 3)
-
+;(pattern-print-verbosity 3)
+;(expr-print-verbosity 3)
+#|
  ;; (foo a (List a))
  (define foo-a-list-a
    (mk-TVariant #f 'foo (list (mk-TFree #f 'a) 
@@ -91,8 +91,8 @@
    (define Γ (hasheq 'x xτ))
    (check expr-α-equal?
           ;; tc-expr resolves x's type to the instantiation
-          ((tc-expr Γ #hasheq())
-           (parse-expr #'(#:match x [(foo y z) z])))
+          (tc-expr ⊥eq Γ ⊥eq
+           (parse-expr #'(#:match x [(foo y z) z])) T⊤ #f)
           (parse-expr #'(#:ann (blah) (#:match (#:ann (#:∪ (bar #:⊤) (foo (bloo) (blah))) x)
                                                [(#:ann (foo (bloo) (blah))
                                                        (foo (#:ann (bloo) y)
@@ -117,7 +117,7 @@
      [#:--> (ev (lam y e) ρ κ)
             (co κ (Clo y e ρ))]
      [#:--> #:name var-lookup
-            (ev (#:and (#:has-type Name) x) ρ κ)
+            (ev (#:has-type Name x) ρ κ)
             (#:ann State (co κ (#:cast Value (#:map-lookup ρ x))))]
 
      [#:--> (co (Cons (ar e ρ) (#:deref κ #:implicit)) v)
@@ -136,6 +136,7 @@
     (define Sτ0 (resolve (parse-type #'State #:use-lang? #t)))
     (define-values (CEK*0 metafunctions*0)
       (tc-language CEK0 '() Sτ0))         ;  (pretty-print CEK*)
+    (displayln "Lang check 1 done")
     (report-all-errors CEK*0)
 
     ;; typecheck with heap allocation
@@ -152,6 +153,7 @@
         (define-values (CEK* metafunctions*)
           (parameterize ([check-for-heapification? #t])
             (tc-language CEK '() Sτ)))  ;  (pretty-print CEK*)
+        (displayln "Lang check 2 done")
 
         (pretty-print CEK*)
         (displayln "Reporting for heapification")
@@ -169,18 +171,57 @@
                     [(x) #:external Name]))])
   (define Γ (hasheq 'x limp-default-deref-addr))
   (define e
-    ((tc-expr Γ ⊥eq)
-     (parse-expr #'(#:match x
-                            [(#:deref (#:cast (app Expr Expr) (app e0 e1))
-                                      #:explicit #:delay #:identity)
-                             e1]))))
+    (tc-expr ⊥eq Γ ⊥eq
+              (parse-expr #'(#:match x
+                                     [(#:deref (#:cast (app Expr Expr) (app e0 e1))
+                                               #:explicit #:delay #:identity)
+                                      e1]))
+              T⊤ '() #f))
   (report-all-errors e)
   (pretty-print e)
   ;; Is tc-expr idempotent?
-  (report-all-errors ((tc-expr Γ ⊥eq) e))
+  (report-all-errors (tc-expr ⊥eq Γ ⊥eq e T⊤ #f))
   
   (displayln "Little test")
   (pretty-print e))
+|#
+
+(define CESK-stx
+  #'([#:--> (ev (app e0 es) ρ κ)
+            (ev e0 ρ (Cons (ev es (Nil) ρ) κ))]
+     [#:--> (ev (lam ys e) ρ κ)
+            (co κ (Clo ys e ρ))]
+     [#:--> #:name var-lookup
+  
+            (ev (#:has-type Name x) ρ κ)
+            (co κ (#:map-lookup ρ x))]
+ 
+     [#:--> (co (Cons (ev (TCons e es) vs ρ) κ) v)
+            (ev e ρ (Cons (ev es (TCons v vs) ρ) κ))]
+     [#:--> (co (Cons (ev (Nil) vs ρ) κ) v)
+            (ap zs e ρ vs* κ)
+            [#:where (TCons (Clo zs e ρ) vs*)
+                     (#:call reverse #:inst [Value] vs)]]
+  
+     [#:--> #:name fun-app
+            (ap ws e ρ vs κ)
+            ;; instantiating with Value instead of the heapified value is killing me...
+            (ev e (#:call extend* #:inst [Name Value] ρ ws vs) κ)]))
+
+(define mf-stxes
+  (list
+   #'(reverse : (#:∀ (A) (#:inst TList A) → (#:inst TList A))
+              [(reverse xs) (#:call rev-app #:inst [A] xs (Nil))])
+   #'(rev-app : (#:∀ (A) (#:inst TList A) (#:inst TList A) → (#:inst TList A))
+              [(rev-app (Nil) acc) acc]
+              [(rev-app (TCons x xs) acc)
+               (#:call rev-app #:inst [A] xs (TCons #:inst [A] x acc))])
+   ;; extend* is an interesting case since we might get (#:map A (#:heapify B)) and (#:inst TList B)
+   ;; If this is the case, we need to automatically create a version of extend* that upcasts the list.
+   #'(extend* : (#:∀ (A B) (#:map A B) (#:inst TList A) (#:inst TList B) → (#:map A B))
+              [(extend* ρ (Nil) (Nil)) ρ]
+              [(extend* ρ (TCons a as) (TCons b bs))
+               (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)])))
 
 (parameterize ([current-language
                 (parse-language
@@ -198,68 +239,53 @@
                     [(κ) Kont (#:inst List Frame)]
                     [State (ev Expr Env Kont)
                            (co Kont Value)
-                           (ap xs Expr Env Values Kont)]))])
+                           (ap xs Expr Env Values Kont)]))]
+               [instantiations (make-hash)])
+  (define CESK (parse-reduction-relation CESK-stx))
+  ;; Mini test
+  (define match-thru
+    (tc-expr ⊥eq (hasheq 'x (parse-type #'Value #:use-lang? #t)) ⊥eq
+     (parse-expr #'(#:match x [(Clo xs e (#:map-with y (Clo ys e* ρ) ρ*)) e*]))
+     T⊤ '() #f))
+  (report-all-errors match-thru)
 
-  (check-true
-   (self-referential? (resolve (parse-type #'(#:inst TList Value) #:use-lang? #t)))
-   "TList[Value] is recursive")
+  (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
+  (define metafunctions (map parse-metafunction mf-stxes))
 
- (define CESK
-   (parse-reduction-relation
-    #'([#:--> (ev (app e0 es) ρ κ)
-              (ev e0 ρ (Cons (ev es (Nil) ρ) κ))]
-       [#:--> (ev (lam ys e) ρ κ)
-              (co κ (Clo ys e ρ))]
-       [#:--> #:name var-lookup
-              (ev (#:and (#:has-type Name) x) ρ κ)
-              (co κ (#:map-lookup ρ x))]
+  (define-values (CESK* metafunctions*)
+    (tc-language (parse-reduction-relation CESK-stx) metafunctions Sτ))
+  (tc-language CESK* metafunctions* Sτ)
+  (displayln "Rechecked")
+  (parameterize ([current-language (heapify-language (current-language) #f)]
+                 [check-for-heapification? #t])
+    (displayln "Heapified")
+    (pretty-print (current-language))
+    (define-values (CESK** metafunctions**)
+      (tc-language (parse-reduction-relation CESK-stx)
+                   (map parse-metafunction mf-stxes) Sτ))
+    (pretty-print metafunctions**)
 
-       [#:--> (co (Cons (ev (TCons e es) vs ρ) κ) v)
-              (ev e ρ (Cons (ev es (TCons v vs) ρ) κ))]
-       [#:--> (co (Cons (ev (Nil) vs ρ) κ) v)
-              (ap zs e ρ vs* κ)
-              [#:where (TCons (Clo zs e ρ) vs*)
-                       (#:call reverse #:inst [Value] vs)]]
+    (define τ (parse-type #'(#:inst TList Value) #:use-lang? #t))
+    (pretty-print τ)
+    (check-pred self-referential?
+                (resolve τ)
+                "TList[Value] is recursive")
 
-       [#:--> #:name fun-app
-              (ap ws e ρ vs κ)
-              (ev e (#:call extend* #:inst [Name Value] ρ ws vs) κ)])))
+    (displayln "Coercing...")
 
- (define match-thru
-   ((tc-expr (hasheq 'x (parse-type #'Value #:use-lang? #t)) #hasheq())
-     (parse-expr #'(#:match x [(Clo xs e (#:map-with y (Clo ys e* ρ) ρ*)) e*]))))
- (report-all-errors match-thru)
+    (define-values (aCESK* ametafunctions*)
+      (coerce-language CESK** metafunctions**))
+    (pretty-print aCESK*)
+    (pretty-print ametafunctions*)
 
- (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
- (define metafunctions
-   (list
-    (parse-metafunction
-     #'(reverse : (#:∀ (A) (#:inst TList A) → (#:inst TList A))
-                [(reverse xs) (#:call rev-app #:inst [A] xs (Nil))]))
-    (parse-metafunction
-     #'(rev-app : (#:∀ (A) (#:inst TList A) (#:inst TList A) → (#:inst TList A))
-                [(rev-app (Nil) acc) acc]
-                [(rev-app (TCons x xs) acc)
-                 (#:call rev-app #:inst [A] xs (TCons x acc))]))
-    (parse-metafunction
-     #'(extend* : (#:∀ (A B) (#:map A B) (#:inst TList A) (#:inst TList B) → (#:map A B))
-                [(extend* ρ (Nil) (Nil)) ρ]
-                [(extend* ρ (TCons a as) (TCons b bs))
-                 (#:call extend* #:inst [A B] (#:extend ρ a b) as bs)]))))
+    (report-all-errors
+     (append (append-map (λ (mf)
+                            (if
+                             (Metafunction? mf)
+                             (peel-scopes (Metafunction-rules mf))
+                             (begin (printf "Non a metafunction: ~a~%" mf)
+                                    '())))
+                         metafunctions*)
+             CESK*))
 
- (define-values (CESK* metafunctions*)
-   (tc-language CESK metafunctions Sτ))
- (pretty-print metafunctions*)
- (pretty-print CESK*)
-
- (report-all-errors
-  (append (append-map (λ (mf)
-                         (if
-                          (Metafunction? mf)
-                          (peel-scopes (Metafunction-rules mf))
-                          (begin (printf "Non a metafunction: ~a~%" mf)
-                                 '())))
-                      metafunctions*)
-          CESK*))
-
- (language->mkV CESK* metafunctions* void)))
+    (language->mkV CESK* metafunctions* void))))

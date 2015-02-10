@@ -37,8 +37,7 @@ and semantics.
   (let rec ([p p])
     (define sexp
       (match p
-        [(PAnd _ _ (? list? ps)) `(#:and . ,(map rec ps))]
-        [(PName _ _ x) x]
+        [(PName _ _ x p) (if (PWild? p) x `(#:name ,x ,(rec p)))]
         [(PWild _ _) '_]
         [(PVariant _ _ n (? list? ps)) `(,n . ,(map rec ps))]
         [(PMap-with _ _ k v p) `(#:map-with ,(rec k)
@@ -55,10 +54,8 @@ and semantics.
                                             ,@(if taddr (list taddr) '())
                                             ,@(if imp '(#:implicit) '()))]
         [(PTerm _ _ t) `(#:term ,(term->sexp t))]
-        [(PIsExternal _ (Cast (TExternal: _ name))) `(#:is-external ,name)]
-        [(PIsAddr _ (Cast (TAddr: _ space mm em)))
-         `(#:is-addr ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
-        [(PIsType _ ct) `(#:is-type ,(πct ct))] ;; printer will handle τ
+        ;; printer will handle τ
+        [(PIsType _ ct p) `(#:is-type ,(πct ct) ,@(if (PWild? p) '() (list (rec p))))]
         [_ `(error$ ,(format "Unsupported pattern: ~a" (struct->vector p)))]))
     (case v
       [(0) sexp]
@@ -68,8 +65,7 @@ and semantics.
 
 (define (pattern-replace-ct ct p)
    (match p
-     [(PAnd sy _ ps) (PAnd sy ct ps)]
-     [(PName sy _ x) (PName sy ct x)]
+     [(PName sy _ x p) (PName sy ct x p)]
      [(PWild sy _) (PWild sy ct)]
      [(PVariant sy _ n ps) (PVariant sy ct n ps)]
      [(PMap-with sy _ k v p) (PMap-with sy ct k v p)]
@@ -77,9 +73,7 @@ and semantics.
      [(PSet-with sy _ v p) (PSet-with sy ct v p)]
      [(PSet-with* sy _ v p) (PSet-with* sy ct v p)]
      [(PTerm sy _ t) (PTerm sy ct t)]
-     [(PIsExternal sy _) (PIsExternal sy ct)]
-     [(PIsAddr sy _) (PIsAddr sy ct)]
-     [(PIsType sy _) (PIsType sy ct)]
+     [(PIsType sy _ p) (PIsType sy ct p)]
      [_ (error 'pattern-replace-ct "Unsupported pattern: ~a" p)]))
 
 (define (write-pattern pat port mode)
@@ -87,8 +81,7 @@ and semantics.
 
 (struct Pattern Typed () #:transparent
         #:methods gen:custom-write [(define write-proc write-pattern)])
-(struct PAnd Pattern (ps) #:transparent)
-(struct PName Pattern (x) #:transparent)
+(struct PName Pattern (x p) #:transparent)
 (struct PWild Pattern () #:transparent)
 (struct PVariant Pattern (n ps) #:transparent)
 (struct PMap-with Pattern (k v p) #:transparent)
@@ -99,14 +92,11 @@ and semantics.
 ;; Expect an address always, so deref and continue matching.
 (struct PDeref Pattern (p taddr implicit?) #:transparent)
 ;; The info is in the type
-(struct PIsExternal Pattern () #:transparent)
-(struct PIsAddr Pattern () #:transparent)
-(struct PIsType Pattern () #:transparent)
+(struct PIsType Pattern (p) #:transparent)
 #|
 pattern template:
  (match pat
-    [(PAnd sy ct ps) ???]
-    [(PName sy ct x) ???]
+    [(PName sy ct x p) ???]
     [(PWild sy ct) ???]
     [(PVariant sy ct n ps) ???]
     [(PMap-with sy ct k v p) ???]
@@ -115,9 +105,7 @@ pattern template:
     [(PSet-with* sy ct v p) ???]
     [(PTerm sy ct t) ???]
     [(PDeref sy ct p taddr imp?) ???]
-    [(PIsExternal sy ct) ???]
-    [(PIsAddr sy ct) ???]
-    [(PIsType sy ct) ???]
+    [(PIsType sy ct p) ???]
     [_ (error who "Unsupported pattern: ~a" pat)])
 |#
 
@@ -133,19 +121,20 @@ pattern template:
       [(_ _) (values ρ0 ρ1 #f)]))
 
   (match* (pat0 pat1)
-    [((PAnd _ ct ps0) (PAnd _ ct ps1)) (sequence-pattern-α-equal? ps0 ps1 ρ0 ρ1)]
-    [((PName _ ct x0) (PName _ ct x1))
+    [((PName _ ct x0 p0) (PName _ ct x1 p1))
      (match (hash-ref ρ0 x0 #f)
        [#f (if (hash-has-key? ρ1 x1)
-               (values ρ0 ρ1 #f)
+               (pattern-α-equal? ρ0 ρ1 p0 p1)
                ;; both unmapped. Freshen to same name.
                (let ([f (gensym)])
-                 (values (hash-set ρ0 x0 f)
-                         (hash-set ρ1 x1 f)
-                         #t)))]
+                 (pattern-α-equal? (hash-set ρ0 x0 f)
+                                   (hash-set ρ1 x1 f)
+                                   p0 p1)))]
        [x0* (match (hash-ref ρ1 x1 #f)
-              [#f (values ρ0 ρ1 #f)]
-              [x1* (values ρ0 ρ1 (eq? x0* x1*))])])]
+              [#f (pattern-α-equal? ρ0 ρ1 p0 p1)]
+              [x1* (if (eq? x0* x1*)
+                       (pattern-α-equal? ρ0 ρ1 p0 p1)
+                       (values ρ0 ρ1 #f))])])]
     [((PVariant _ ct n ps0) (PVariant _ ct n ps1))
      (sequence-pattern-α-equal? ps0 ps1 ρ0 ρ1)]
     [((PMap-with _ ct k0 v0 p0) (PMap-with _ ct k1 v1 p1))
@@ -158,10 +147,9 @@ pattern template:
      (sequence-pattern-α-equal? (list v0 p0) (list v1 p1) ρ0 ρ1)]
     [((PTerm _ ct t0) (PTerm _ ct t1)) (values ρ0 ρ1 (term-α-equal? t0 t1))]
     [((PDeref _ ct p0 taddr imp) (PDeref _ ct p1 taddr imp)) (pattern-α-equal? p0 p1)]
-    [((PIsExternal _ ct) (PIsExternal _ ct)) (values ρ0 ρ1 #t)]
     [((PWild _ ct) (PWild _ ct)) (values ρ0 ρ1 #t)]
-    [((PIsAddr _ ct) (PIsAddr _ ct)) (values ρ0 ρ1 #t)]
-    [((PIsType _ ct) (PIsType _ ct)) (values ρ0 ρ1 #t)]
+    [((PIsType _ ct p0) (PIsType _ ct p1))
+     (pattern-α-equal? ρ0 ρ1 p0 p1)]
     [(_ _) (values ρ0 ρ1 #f)]))
 
 ;; Elaborated Terms
@@ -300,6 +288,9 @@ term template
 ;; Expressions
 (struct Expression Typed () #:transparent
         #:methods gen:custom-write [(define write-proc write-expr)])
+(struct Map-Expression Expression () #:transparent)
+(struct Set-Expression Expression () #:transparent)
+
 (struct ECall Expression (mf τs es) #:transparent)
 (struct EVariant Expression (n tag τs es) #:transparent)
 (struct ERef Expression (x) #:transparent)
@@ -313,23 +304,24 @@ term template
 (struct ELet Expression (bus body) #:transparent)
 (struct EMatch Expression (discriminant rules) #:transparent)
 (struct EIf Expression (g t e) #:transparent)
-(struct EExtend Expression (m tag k v) #:transparent)
-(struct EEmpty-Map Expression () #:transparent)
-(struct EEmpty-Set Expression () #:transparent)
-(struct ESet-add Expression (s tag v) #:transparent)
-;; utility expressions
-(struct ESet-union Expression (es) #:transparent)
-(struct ESet-intersection Expression (e es) #:transparent)
-(struct ESet-subtract Expression (e es) #:transparent)
-(struct ESet-remove Expression (e es) #:transparent)
-(struct ESet-member Expression (e v) #:transparent)
-(struct EMap-lookup Expression (m k) #:transparent)
-(struct EMap-has-key Expression (m k) #:transparent)
-(struct EMap-remove Expression (m k) #:transparent)
-(struct EUnquote Expression (e) #:transparent)
 (struct EExternal Expression (v) #:transparent)
+
+(struct EExtend Map-Expression (m tag k v) #:transparent)
+(struct EEmpty-Map Map-Expression () #:transparent)
+(struct EEmpty-Set Set-Expression () #:transparent)
+(struct ESet-add Set-Expression (s tag v) #:transparent)
 ;; For heap-allocation annotations and algebraic eliminations
+(struct EUnquote Expression (e) #:transparent)
 (struct EHeapify Expression (e taddr tag) #:transparent)
+;; utility expressions
+(struct ESet-union Set-Expression (es) #:transparent)
+(struct ESet-intersection Set-Expression (e es) #:transparent)
+(struct ESet-subtract Set-Expression (e es) #:transparent)
+(struct ESet-remove Set-Expression (e es) #:transparent)
+(struct ESet-member Set-Expression (e v) #:transparent)
+(struct EMap-lookup Map-Expression (m k) #:transparent)
+(struct EMap-has-key Map-Expression (m k) #:transparent)
+(struct EMap-remove Map-Expression (m k) #:transparent)
 (struct implicit-tag (tag) #:prefab)
 #|
 expr template
@@ -589,8 +581,7 @@ expr template
   (let self ([pat pat])
     (define ct* (abstract-frees-in-ct (Typed-ct pat) names))
     (match pat
-      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
-      [(PName sy _ x) (PName sy ct* x)]
+      [(PName sy _ x p) (PName sy ct* x (self p))]
       [(PWild sy ct) (PWild sy ct*)]
       [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
       [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
@@ -599,17 +590,14 @@ expr template
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (abstract-frees-in-term t names))]
       [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
-      [(PIsExternal sy _) (PIsExternal sy ct*)]
-      [(PIsAddr sy _) (PIsAddr sy ct*)]
-      [(PIsType sy _) (PIsType sy ct*)]
+      [(PIsType sy _ p) (PIsType sy ct* (self p))]
       [_ (error 'abstract-frees-in-pattern "Unsupported pattern: ~a" pat)])))
 
 (define (open-scopes-in-pattern pat substs)
   (let self ([pat pat])
     (define ct* (open-scopes-in-ct (Typed-ct pat) substs))
     (match pat
-      [(PAnd sy _ ps) (PAnd sy ct* (map self ps))]
-      [(PName sy _ x) (PName sy ct* x)]
+      [(PName sy _ x p) (PName sy ct* x (self p))]
       [(PWild sy ct) (PWild sy ct*)]
       [(PVariant sy _ n ps) (PVariant sy ct* n (map self ps))]
       [(PMap-with sy _ k v p) (PMap-with sy ct* (self k) (self v) (self p))]
@@ -618,9 +606,7 @@ expr template
       [(PSet-with* sy _ v p) (PSet-with* sy ct* (self v) (self p))]
       [(PTerm sy _ t) (PTerm sy ct* (open-scopes-in-term t substs))]
       [(PDeref sy _ p taddr imp) (PDeref sy ct* (self p) taddr imp)]
-      [(PIsExternal sy _) (PIsExternal sy ct*)]
-      [(PIsAddr sy _) (PIsAddr sy ct*)]
-      [(PIsType sy _) (PIsType sy ct*)]
+      [(PIsType sy _ p) (PIsType sy ct* (self p))]
       [_ (error 'open-scopes-in-pattern "Unsupported pattern: ~a" pat)])))
 
 (define (abstract-frees τ names)
@@ -735,8 +721,8 @@ expr template
              τ scoped-rules))
   (let open ([τ τ] [names '()] [tvs '()])
    (match τ
-     [(TΛ: _ name s)
+     [(TΛ: _ name s oa)
       (define name* (fresh-name (support (Scope-t s)) name))
       (define tv (mk-TFree #f name*))
-      (open (open-scope s tv) (cons name* names) (cons tv tvs))]
+      (open (oa (open-scope s tv)) (cons name* names) (cons tv tvs))]
      [_ (values names τ (open-scopes-in-rules scoped-rules tvs))])))
