@@ -16,6 +16,7 @@
          "tast.rkt"
          "tc.rkt"
          "tc-toplevel.rkt"
+         "tc-ctxs.rkt"
          "types.rkt")
 
 ;; If there are any time or space leaks, kill the tests.
@@ -46,7 +47,7 @@
  (define foo-tt (mk-TVariant #f 'foo (list T⊤ T⊤) 'untrusted))
  (check-equal? foo-tt (parse-type #'(foo #:⊤ #:⊤)))
 
-(define blah (mk-TVariant #f 'blah (list) 'untrusted))
+ (define blah (mk-TVariant #f 'blah (list) 'untrusted))
  (define list-a
    (mk-TΛ #f 'a (abstract-free (sort-TUnion #f
                                          (list blah
@@ -99,7 +100,7 @@
                                                             (#:ann (blah) z)))
                                                 (#:ann (blah) z)])))))
 
-(define CEK-lang (parse-language
+ (define CEK-lang (parse-language
                   #'([Expr (app Expr Expr) x (lam x Expr) #:bounded]
                      [(x) #:external Name #:syntax identifier?]
                      [Value (Clo x Expr Env)]
@@ -111,7 +112,7 @@
                             (co Kont Value)
                             (ap x Expr Env Value Kont)])))
 
-(define CEK-Rstx
+ (define CEK-Rstx
   #'([#:--> (ev (app e0 e1) ρ κ)
             (ev e0 ρ (Cons (ar e1 ρ) κ))]
      [#:--> (ev (lam y e) ρ κ)
@@ -130,7 +131,7 @@
             (ev e (#:extend ρ w v) κ)]))
 
 ;; typecheck without heap allocation.
-(parameterize ([instantiations (make-hash)])
+ (parameterize ([instantiations (make-hash)])
   (parameterize ([current-language CEK-lang])
     (define CEK0 (parse-reduction-relation CEK-Rstx))
     (define Sτ0 (resolve (parse-type #'State #:use-lang? #t)))
@@ -165,17 +166,17 @@
         (pretty-print (solidify-language (current-language)))
         (pretty-print CEK2)))))
 
-(parameterize ([current-language
+ (parameterize ([current-language
                 (parse-language
                  #'([Expr (app Expr Expr) x (lam x Expr)]
                     [(x) #:external Name]))])
   (define Γ (hasheq 'x limp-default-deref-addr))
-  (define e
-    (tc-expr ⊥eq Γ ⊥eq
-              (parse-expr #'(#:match x
-                                     [(#:deref (#:cast (app Expr Expr) (app e0 e1))
-                                               #:explicit #:delay #:identity)
-                                      e1]))
+  (define-values (Δ e)
+    (tc-expr Γ ⊥eq
+             (parse-expr #'(#:match x
+                                    [(#:deref (#:cast (app Expr Expr) (app e0 e1))
+                                              #:explicit #:delay #:identity)
+                                     e1]))
               T⊤ '() #f))
   (report-all-errors e)
   (pretty-print e)
@@ -243,11 +244,12 @@
                [instantiations (make-hash)])
   (define CESK (parse-reduction-relation CESK-stx))
   ;; Mini test
-  (define match-thru
-    (tc-expr ⊥eq (hasheq 'x (parse-type #'Value #:use-lang? #t)) ⊥eq
+  (define-values (Δ match-thru)
+    (tc-expr (ctx-extend-var (empty-ctx) 'x (parse-type #'Value #:use-lang? #t)) ⊥eq
      (parse-expr #'(#:match x [(Clo xs e (#:map-with y (Clo ys e* ρ) ρ*)) e*]))
      T⊤ '() #f))
   (report-all-errors match-thru)
+  (displayln "Mini test done")
 
   (define Sτ (resolve (parse-type #'State #:use-lang? #t)))
   (define metafunctions (map parse-metafunction mf-stxes))

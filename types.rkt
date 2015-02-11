@@ -233,11 +233,8 @@
   (mk-TVariant #f n (make-list arity T⊤) #f))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Binding/naming operations
+;; THeap and address type combinations
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-(define (open-scope s t)
-  (match-define (Scope t*) s)
-  (open-scope-aux t* 0 t))
 
 (define (combine-taddr t0 t1 on-fail)
   (match* (t0 t1)
@@ -257,12 +254,112 @@
      (*THeap #f sy tag
              (combine-taddr taddr taddr*
                             (λ _ 
-                               (TError sy
-                                       (list (format "~a in heapified type: ~a ~a"
+                               (TError (list (format "~a in heapified type: ~a ~a"
                                                      "Could not combine addresses"
                                                      taddr taddr*)))))
              τ*)]
     [τ* (*THeap 'combine0 sy taddr tag τ*)]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Fold over types with defaults
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(define (unsafe-type-fold #:TBound [base-TBound (λ (self sy i) self)]
+                   #:Tμ [app-Tμ (λ (self sy x acc tr n) (mk-Tμ sy x (Scope acc) tr n))]
+                   #:TΛ [app-TΛ (λ (self sy x acc on-app) (mk-TΛ sy x (Scope acc) on-app))]
+                   #:T⊤ [base-T⊤ T⊤]
+                   #:T⊥ [base-T⊥ T⊥]
+                   #:TAddr [base-TAddr (λ (self sy space mm em) self)]
+                   #:TFree [base-TFree (λ (self sy x) self)]
+                   #:TExternal [base-TExternal (λ (self sy name) self)]
+                   #:TName [base-TName (λ (self sy x) self)]
+                   #:TError [base-TError (λ (self msgs) self)]
+                   #:TUnion [app-TUnion (λ (self sy accs) (mk-TUnion sy accs))]
+                   #:TVariant [app-TVariant (λ (self sy name accs tr) (mk-TVariant sy name accs tr))]
+                   #:TCut [app-TCut (λ (self sy acc-t acc-u) (mk-TCut sy acc-t acc-u))]
+                   #:TMap [app-TMap (λ (self sy acc-d acc-r ext) (mk-TMap sy acc-d acc-r ext))]
+                   #:TSet [app-TSet (λ (self sy acc ext) (mk-TSet sy acc ext))]
+                   #:TWeak [app-TWeak (λ (self sy acc) (mk-TWeak sy acc))]
+                   #:THeap [app-THeap (λ (self sy taddr tag acc) (mk-THeap sy taddr tag acc))]
+                   #:TArrow [app-TArrow (λ (self sy acc-d acc-r) (mk-TArrow sy acc-d acc-r))]
+                   τ)
+  (let fold ([τ τ])
+    (match τ
+      [(TBound: sy i) (base-TBound τ sy i)]
+      [(Tμ: sy x (Scope t) tr n) (app-Tμ τ sy x (fold t) tr n)]
+      [(TΛ: sy x (Scope t) on-app) (app-TΛ τ sy x (fold t) on-app)]
+      [(? T⊤?) base-T⊤]
+      [(? T⊥?) base-T⊥]
+      [(TAddr: sy space mm em) (base-TAddr τ sy space mm em)]
+      [(TFree: sy x) (base-TFree τ sy x)]
+      [(TExternal: sy name) (base-TExternal τ sy name)]
+      [(TName: sy name) (base-TName τ sy name)]
+      [(TError msgs) (base-TError τ msgs)]
+      [(TUnion: sy ts) (app-TUnion τ sy (map fold ts))]
+      [(TVariant: sy name ts tr) (app-TVariant τ sy name (map fold ts) tr)]
+      [(TCut: sy t u) (app-TCut τ sy (fold t) (fold u))]
+      [(TMap: sy t-dom t-rng ext) (app-TMap τ sy (fold t-dom) (fold t-rng) ext)]
+      [(TSet: sy t ext) (app-TSet τ sy (fold t) ext)]
+      [(TWeak: sy τ) (app-TWeak τ sy (fold τ))]
+      [(THeap: sy taddr tag τ) (app-THeap τ sy (fold taddr) tag (fold τ))]
+      ;; second-class citizens
+      [(TArrow: sy d r) (app-TArrow τ sy (fold d) (fold r))]
+      [(? permissive?) τ]
+      [_ (error 'unsafe-type-fold "Bad type ~a" τ)])))
+
+(define (type-fold #:TBound [base-TBound (λ (self sy i) self)]
+                   #:Tμ [app-Tμ (λ (self sy x acc tr n x*) (mk-Tμ sy x (abstract-free acc x*) tr n))]
+                   #:TΛ [app-TΛ (λ (self sy x acc on-app x*) (mk-TΛ sy x (abstract-free acc x*) on-app))]
+                   #:T⊤ [base-T⊤ T⊤]
+                   #:T⊥ [base-T⊥ T⊥]
+                   #:TAddr [base-TAddr (λ (self sy space mm em) self)]
+                   #:TFree [base-TFree (λ (self sy x) self)]
+                   #:TExternal [base-TExternal (λ (self sy name) self)]
+                   #:TName [base-TName (λ (self sy x) self)]
+                   #:TError [base-TError (λ (self msgs) self)]
+                   #:TUnion [app-TUnion (λ (self sy accs) (mk-TUnion sy accs))]
+                   #:TVariant [app-TVariant (λ (self sy name accs tr) (mk-TVariant sy name accs tr))]
+                   #:TCut [app-TCut (λ (self sy acc-t acc-u) (mk-TCut sy acc-t acc-u))]
+                   #:TMap [app-TMap (λ (self sy acc-d acc-r ext) (mk-TMap sy acc-d acc-r ext))]
+                   #:TSet [app-TSet (λ (self sy acc ext) (mk-TSet sy acc ext))]
+                   #:TWeak [app-TWeak (λ (self sy acc) (mk-TWeak sy acc))]
+                   #:THeap [app-THeap (λ (self sy taddr tag acc) (mk-THeap sy taddr tag acc))]
+                   #:TArrow [app-TArrow (λ (self sy acc-d acc-r) (mk-TArrow sy acc-d acc-r))]
+                   τ)
+  (let fold ([τ τ])
+    (match τ
+      [(TBound: sy i) (base-TBound τ sy i)]
+      [(Tμ: sy x s tr n)
+       (define temp (gensym x))
+       (app-Tμ τ sy x (fold (open-scope s (mk-TFree #f temp))) tr n temp)]
+      [(TΛ: sy x s on-app)
+       (define temp (gensym x))
+       (app-TΛ τ sy x (fold (open-scope s (mk-TFree #f temp))) on-app temp)]
+      ;; boilerplate
+      [(? T⊤?) base-T⊤]
+      [(? T⊥?) base-T⊥]
+      [(TAddr: sy space mm em) (base-TAddr τ sy space mm em)]
+      [(TFree: sy x) (base-TFree τ sy x)]
+      [(TExternal: sy name) (base-TExternal τ sy name)]
+      [(TName: sy name) (base-TName τ sy name)]
+      [(TError msgs) (base-TError τ msgs)]
+      [(TUnion: sy ts) (app-TUnion τ sy (map fold ts))]
+      [(TVariant: sy name ts tr) (app-TVariant τ sy name (map fold ts) tr)]
+      [(TCut: sy t u) (app-TCut τ sy (fold t) (fold u))]
+      [(TMap: sy t-dom t-rng ext) (app-TMap τ sy (fold t-dom) (fold t-rng) ext)]
+      [(TSet: sy t ext) (app-TSet τ sy (fold t) ext)]
+      [(TWeak: sy τ) (app-TWeak τ sy (fold τ))]
+      [(THeap: sy taddr tag τ) (app-THeap τ sy (fold taddr) tag (fold τ))]
+      ;; second-class citizens
+      [(TArrow: sy d r) (app-TArrow τ sy (fold d) (fold r))]
+      [(? permissive?) τ]
+      [_ (error 'type-fold "Bad type ~a" τ)])))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Binding/naming operations
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(define (open-scope s t)
+  (match-define (Scope t*) s)
+  (open-scope-aux t* 0 t))
 
 (define (open-scope-aux t* i t)
   (let open ([t* t*] [i i])
@@ -428,49 +525,13 @@
           [_ (error 'uninhabitable? "Bad type ~a" t)])))
   (rec t #f ∅eq))
 
-;; Remove mutable unification variables.
-(define (freeze t [∪ mk-TUnion])
-  (let rec ([t t])
-    (match t
-      [(TUnif _ τ) (rec τ)]
-      ;; boilerplate
-      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (rec t)) tr n)]
-      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (rec t)) on-app)]
-      [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
-      ;; Resimplify, since unification may have bumped some stuff up.
-      [(TUnion: sy ts) (∪ sy (map rec ts))]
-      [(TCut: sy t u) (mk-TCut sy (rec t) (rec u))]
-      [(TVariant: sy name ts tr) (*TVariant sy name (map rec ts) tr)] ;; *TVariant
-      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (rec t-dom) (rec t-rng) ext)]
-      [(TSet: sy t ext) (mk-TSet sy (rec t) ext)]
-      [(TWeak: sy t) (mk-TWeak sy (rec t))]
-      [(THeap: sy taddr tag τ) (*THeap 'rec sy taddr tag (rec τ))]
-      [(TArrow: sy dom rng) (mk-TArrow sy (rec dom) (rec rng))]
-      [(? permissive?) t]
-      [_ (error 'freeze "Bad type ~a" t)])))
-
 ;; Change free variables to ⊤
-(define (free->x x t #:pred [pred (const #t)] #:∪ [∪ mk-TUnion])
-  (let self ([t t])
-    (match t
-      [(? TFree?) (if (pred t)
-                      x
-                      t)]
-      ;; boilerplate
-      [(Tμ: sy x (Scope t) tr n) (mk-Tμ sy x (Scope (self t)) tr n)]
-      [(TΛ: sy x (Scope t) on-app) (mk-TΛ sy x (Scope (self t)) on-app)]
-      [(or (? T⊤?) (? TAddr?) (? TBound?) (? TName?) (? TFree?) (? TError?) (? TExternal?)) t]
-      ;; Resimplify, since unification may have bumped some stuff up.
-      [(TUnion: sy ts) (∪ sy (map self ts))]
-      [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
-      ;; XXX: This must be mk-TVariant and not *TVariant in order to not conflate (foo X) with (bar X)
-      [(TVariant: sy name ts tr) (mk-TVariant sy name (map self ts) tr)]
-      [(TMap: sy t-dom t-rng ext) (mk-TMap sy (self t-dom) (self t-rng) ext)]
-      [(TSet: sy t ext) (mk-TSet sy (self t) ext)]
-      [(TWeak: sy t) (mk-TSet sy (self t))]
-      [(THeap: sy taddr tag τ) (mk-THeap sy taddr tag (self τ))]
-      [(TArrow: sy dom rng) (mk-TArrow sy (self dom) (self rng))]
-      [_ (error 'free->x "Bad type ~a" t)])))
+(define (free->x x t #:pred [pred (const #t)] #:∪ [∪ (λ (self sy ts) (mk-TUnion sy ts))])
+  (unsafe-type-fold #:TΛ (λ (self sy x acc on-app) (mk-TΛ sy x (Scope acc) on-app))
+                    #:Tμ (λ (self sy x acc tr n) (mk-Tμ sy x (Scope acc) tr n))
+                    #:TFree (λ (self sy y) (if (pred y) x self))
+                    #:TUnion ∪
+                    t))
 
 (define ff (cons #f #f))
 (define vf (cons values #f))
@@ -566,7 +627,8 @@
                   (and A* (all A* ts))]))]
             [(or (Tμ: _ _ (Scope t) _ _)  (TSet: _ t _))
              (coind A* t)]
-            [(or (? TΛ?) (? TFree?)) #f]
+            [(? TΛ?) #f] ;; free type variables from the function context are still "mono",
+            ;; since the application will have to be mono.
             [(? needs-resolve?)
              (coind A* (resolve t))]
             [(or (THeap: _ _ _ τ) (TWeak: _ τ)) (coind A* τ)]
@@ -686,21 +748,6 @@
    (match (resolve τ)
      [(TΛ: _ _ (Scope σ) _) (count σ (add1 i))]
      [_ i])))
-
-;; Create unification variables for implicit types.
-;; If over- or under-instantiated, return #f.
-(define (apply-annotation τs τ)
-  (define τs*
-    (if (list? τs)
-        (for/list ([τ (in-list τs)])
-          (or τ (TUnif (gensym) T⊤)))
-        (build-list (num-top-level-Λs τ) (λ _ (TUnif (gensym) T⊤)))))
-  (define possible-out (repeat-inst τ τs*))
-  (cond
-   [(or (not possible-out) (TΛ? (resolve possible-out)))
-    (values #f #f)] ;; should be fully instantiated
-   [else
-    (values (map freeze τs*) (freeze possible-out))]))
 
 ;; If we have (n τ ...) ≤ (n σ ...) and one unfolds more than the other, what do we do?
 ;; It's possible to introduce type errors because one unfolding won't be a subtype of the other.

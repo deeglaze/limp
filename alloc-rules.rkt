@@ -5,6 +5,7 @@
          "tast.rkt"
          "type-formers.rkt"
          "types.rkt"
+         "tc-ctxs.rkt"
          racket/dict
          racket/set
          racket/match
@@ -189,13 +190,11 @@
                                          (define t* (self t))
                                          (printf "Done ~a~%" t*)
                                          t*))]
-      [(TUnion: sy ts) (*TUnion sy (map self ts))]
+      [(TUnion: sy ts)
+       (define-values (Δ t) (*TUnion (empty-ctx) sy (map self ts)))
+       t]
       [(TCut: sy t u) (mk-TCut sy (self t) (self u))]
       [(TWeak: sy t) (mk-TWeak sy (self t))]
-      [(TUnif _ t)
-       (define τ* (self t))
-       (set-TUnif-τ! τ τ*)
-       τ*]
       [(? TBound?) 
        (error 'self-referential? "We shouldn't see deBruijn indices here ~a" τ)]
       [_ (error 'heapify-τ "Bad type ~a" τ)]))
@@ -333,7 +332,9 @@
      (mk-Tμ sy x (Scope (solidify-τ t)) tr n)]
     [(TΛ: sy x (Scope t) h)
      (mk-TΛ sy x (Scope (solidify-τ t)) h)]
-    [(TUnion: sy ts) (*TUnion sy (map solidify-τ ts))]
+    [(TUnion: sy ts)
+     (define-values (Δ t) (*TUnion (empty-ctx) sy (map solidify-τ ts)))
+     t]
     [(TWeak: sy t) (mk-TWeak sy (solidify-τ t))]
     [(TCut: sy t u) (mk-TCut sy (solidify-τ t) (solidify-τ u))]
     [(? T⊤?) T⊤]

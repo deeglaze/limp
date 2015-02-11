@@ -7,10 +7,10 @@
 
 ;; Find all instances of variants named n with given arity, and return
 ;; their type, additionally quantified by all the containing Λs.
-(define (lang-variants-of-arity overlap)
+(define (lang-variants-of-arity Γ overlap)
   (define us (Language-ordered-us (current-language)))
   (define seen (mutable-seteq))
-  (define more-upper (free->x T⊤ overlap #:∪ *TUnion))
+  (define more-upper (free->x T⊤ overlap #:∪ (λ (self sy ts) (sort-TUnion sy ts))))
   (reverse
    (for/fold ([found '()])
        ([nu (in-list us)])
@@ -35,11 +35,12 @@
              [(or (T⊤? more-upper)
                   (and (TVariant? more-upper)
                        (eq? (TVariant-name τ*) (TVariant-name more-upper))))
+              (define-values (Δ m) (type-meet Γ τ* more-upper))
               (displayln "Maybe")
               (trace-type-meet!)
               (define found*
                 ;; Tpermissive is like T⊥ orderwise, but doesn't constitute an error.
-                (if (T⊥? (type-meet τ* more-upper)) 
+                (if (T⊥? m)
                     found
                     (begin #;(printf "Granted ~a, ~a~%" τ overlap)
                       (cons (quantify-frees τ TVs #:names Name-TVs #:OAs OAs) found))))

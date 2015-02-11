@@ -3,10 +3,12 @@
          unbound-mf unbound-pat-var
          up-expr-construction down-expr-construction
          give-tag explicit-tag
-         *reshape *in/out heapify-with heapify-generic)
-(require racket/match
+         *reshape *in/out heapify-with heapify-generic
+         apply-annotation)
+(require racket/match foracc
          (only-in racket/bool implies)
          "language.rkt" "subtype.rkt" "type-lattice.rkt"
+         "tc-ctxs.rkt"
          "types.rkt" "tast.rkt")
 ;; Map a name to a map of types to metafunction definitions.
 ;; This separates all metafunctions out into their appropriate monomorphizations.
@@ -23,8 +25,7 @@
 (define ((unbound-pat-var sy who x))
   (raise-syntax-error who (format "Unbound pattern variable: ~a" x) sy))
 
-(define (heapify-with taddr τ)
-  (mk-THeap #f taddr #f τ)) ;; mm/em/tag all will be supplied by the meet.
+(define (heapify-with taddr τ) (mk-THeap #f taddr #f τ)) ;; mm/em/tag all will be supplied by the meet.
 (define (heapify-generic τ) (heapify-with generic-TAddr τ))
 
 ;; Hτ → τ
@@ -50,78 +51,105 @@
 
 ;; Reshaping must first reconcile with user annotations before continuing onward.
 (define (*reshape expected down-construction up-construction)
-  (λ (shape-τ Δ Γ [tag #f] #:require-<:? [no-meet? #f])
-     (define shaped (resolve (type-meet expected shape-τ)))
+  (λ (shape-τ Γ [tag #f])
+     (define-values (Δ m) (type-meet Γ expected shape-τ))
+     (define shaped (resolve m))
      (cond
       [(T⊥? shaped) ;;(uninhabitable? shaped Γ)
 ;       (printf "Uninhabitable with expectation ~a~%" expected)
         (cond
          ;; Downcast
          [(THeap? shape-τ) ;; Expect τ, have Hσ, so Hσ → τ (if σ ⊓ τ ≠ ⊥)
-          (match (resolve (type-meet (heapify-generic expected) shape-τ))
+          (define-values (Θ m) (type-meet Δ (heapify-generic expected) shape-τ))
+          (match (resolve m)
             [(THeap: sy taddr tag* τ)
-             (values tag*
+             (values Θ tag*
                      (down-construction sy taddr (or tag* tag))
                      values
                      τ)]
-            [_ (values #f values values T⊥)])]
+            [_ (values Γ #f values values T⊥)])]
          ;; Upcast
          [else ;; Have τ, may
-          (match (resolve (type-meet expected (heapify-generic shape-τ)))
+          (define-values (Θ m) (type-meet Δ expected (heapify-generic shape-τ)))
+          (match (resolve m)
             [(THeap: sy taddr tag* τ)
-             (values tag*
+             (values Θ tag*
                      (up-construction sy taddr (or tag* tag))
                      (λ (τ) (mk-THeap sy taddr tag* τ))
                      τ)]
-            [_ (values #f values values shaped)])])]
+            [_ (values Δ #f values values shaped)])])]
       [else
        ;; Both are heapified, but we want to get at the appropriate structure underneath.
        (match shaped
          [(THeap: sy taddr tag* τ)
-          (values tag*
+          (values Δ
+                  tag*
                   values
                   (λ (τ) (mk-THeap sy taddr (or tag* tag) τ))
                   τ)]
-         [non-H (values #f values values non-H)])])))
+         [non-H (values Δ #f values values non-H)])])))
 
 (define (*in/out expected down-construction up-construction)
-  (λ (shape-τ [tag #f] #:require-<:? [no-meet? #f])
-     (define (bad) (values #f values values T⊥))
-     (displayln "In/out start")
-     (trace-<:?)
-     (begin0
-         (cond
-          [(<:? shape-τ expected)
-           (match shape-τ
-             [(THeap: sy taddr tag* τ)
-              (match-define (THeap: _ taddr* _ _)
-                            (type-meet expected (heapify-generic (THeap-τ expected))))
-              (define taddr** (type-meet taddr taddr*))
-              (if (T⊥? taddr**)
-                  (bad)
-                  (values tag*
-                          values
-                          (λ (τ) (mk-THeap sy taddr** (or tag* tag) (THeap-τ τ)))
-                          shape-τ))]
-             [_ (values #f values values (resolve shape-τ))])]
-          ;; Downcast
-          [(THeap? shape-τ)
-           (match-define (THeap: sy taddr tag* τ) shape-τ)
-           (if (<:? τ expected)
-               (values tag*
-                       (down-construction sy taddr (or tag* tag))
-                       values
-                       (resolve τ))
-               (bad))]
-          ;; Upcast
-          [(THeap? expected)
-           (match-define (THeap: sy taddr tag* τ) expected)
-           (if (<:? shape-τ τ)
-               (values tag*
-                       (up-construction sy taddr (or tag* tag))
-                       (λ (τ) (mk-THeap sy taddr tag* τ))
-                       (resolve shape-τ))
-               (bad))]
-          [else (bad)])
-       (untrace-<:?)
-       (displayln "In/out end"))))
+  (λ (shape-τ Γ [tag #f])
+     (define (bad Γ) (values Γ #f values values T⊥))
+     (cond
+      [(<:? Γ shape-τ expected) =>
+       (λ (Δ)
+          (match shape-τ
+            [(THeap: sy taddr tag* τ)
+             (match-define-values
+              (Θ (THeap: _ taddr* _ _))
+              (type-meet Δ expected (heapify-generic (THeap-τ expected))))
+             (define-values (Γ* taddr**) (type-meet Θ taddr taddr*))
+             (if (T⊥? taddr**)
+                 (bad Γ*)
+                 (values Γ* tag*
+                         values
+                         (λ (τ) (mk-THeap sy taddr** (or tag* tag) (THeap-τ τ)))
+                         shape-τ))]
+            [_ (values Γ #f values values (resolve shape-τ))]))]
+      ;; Downcast
+      [(THeap? shape-τ)
+       (match-define (THeap: sy taddr tag* τ) shape-τ)
+       (cond
+        [(<:? Γ τ expected) =>
+         (λ (Δ)
+            (values Δ tag*
+                    (down-construction sy taddr (or tag* tag))
+                    values
+                    (resolve τ)))]
+        [else (bad Γ)])]
+      ;; Upcast
+      [(THeap? expected)
+       (match-define (THeap: sy taddr tag* τ) expected)
+       (cond
+        [(<:? Γ shape-τ τ) =>
+         (λ (Δ)
+            (values Δ tag*
+                    (up-construction sy taddr (or tag* tag))
+                    (λ (τ) (mk-THeap sy taddr tag* τ))
+                    (resolve shape-τ)))]
+        [else (bad Γ)])]
+      [else (bad Γ)])))
+
+;; Create unification variables for implicit types.
+;; If over- or under-instantiated, return #f.
+(define (apply-annotation Γ τs τ)
+  (define-values (Δ τs*)
+    (if (list? τs)
+        (for/acc ([Γ Γ] [#:type list])
+                 ([τ (in-list τs)])
+          (cond [τ (values Γ τ)]
+                [else
+                 (define α̂ (gensym 'α))
+                 (values (ctx-extend-uvar Γ α̂) (mk-TFree #f α̂))]))
+        (for/acc ([Γ Γ] [#:type list])
+                 ([dummy (in-range (num-top-level-Λs τ))])
+          (define α̂ (gensym 'α))
+          (values (ctx-extend-uvar Γ α̂) (mk-TFree #f α̂)))))
+  (define possible-out (repeat-inst τ τs*))
+  (cond
+   [(or (not possible-out) (TΛ? (resolve possible-out)))
+    (values Δ #f #f)] ;; should be fully instantiated
+   [else
+    (values Δ τs* possible-out)]))

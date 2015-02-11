@@ -6,6 +6,7 @@
          racket/set
          racket/string racket/trace
          "common.rkt" "language.rkt" "tast.rkt" "types.rkt"
+         "tc-ctxs.rkt"
          "tc-common.rkt" "tc.rkt")
 (provide tc-language
          tc-metafunctions
@@ -26,7 +27,7 @@
   (define mfs** (tc-metafunctions mfs* Ξ))
   (displayln "Check 2 done")
   ;; Populate types of metafunction calls
-  (define rules* (tc-rules ⊥eq #hash() Ξ rules state-τ state-τ 'root '()))
+  (define-values (Δ rules*) (tc-rules (empty-ctx) Ξ rules state-τ state-τ 'root '()))
   (report-all-errors (append (metafunction-errors mfs*)
                              (metafunction-errors mfs**)
                              rules*))
@@ -43,7 +44,7 @@
     (report-all-errors (tc-metafunctions mfs* Ξ))
     (displayln "Check 2 done")
     ;; When checking the rules, all ecalls will additionally populate monomorphized
-    (define rules* (tc-rules ⊥eq #hash() Ξ rules state-τ state-τ 'root '()))
+    (define-values (Δ rules*) (tc-rules (empty-ctx) Ξ rules state-τ state-τ 'root '()))
     (displayln "Check 3 done")
     (values rules*
             (append-map hash-values (hash-values (monomorphized))))))
@@ -54,7 +55,11 @@
     (match-define (Metafunction name τ scoped-rules) mf)
     (match-define-values (names (TArrow: _ dom rng) rules) (open-type-and-rules τ scoped-rules))
     (displayln (format "Checking ~a" mf))
-    (define rules* (tc-rules ⊥eq #hash() Ξ rules dom rng `(def . ,name) '()))
+    (define-values (Δ rules*)
+      (tc-rules (for/fold ([Δ ⊥eq])
+                    ([name (in-list names)])
+                  (ctx-extend-tvar Δ name))
+                Ξ rules dom rng `(def . ,name) '()))
     (report-all-errors rules*)
     (displayln "Checked")
     (Metafunction name τ (abstract-frees-in-rules rules* names))))

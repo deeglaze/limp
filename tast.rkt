@@ -1,5 +1,5 @@
 #lang racket/base
-(require racket/match racket/set "common.rkt" "types.rkt")
+(require racket/match racket/set "language.rkt" "common.rkt" "types.rkt")
 #|
 This module provides the structs that the Limp compiler uses to typecheck an input language
 and semantics.
@@ -232,6 +232,7 @@ term template
         [(EAlloc _ (Check (TAddr: _ space mm em)) tag)
          `(#:alloc ,@(do-tag tag) ,space ,(and mm (s->k mm)) ,(and em (s->k em)))]
         [(ELet _ _ bus body) `(#:let ,(map bu->sexp bus) ,(rec body))]
+        [(ELetrec _ _ mfs body) `(#:letrec ,(map mf->sexp mfs) ,(rec body))]
         [(EMatch _ _ de rules) `(#:match ,(rec de) . ,(map (rule->sexp #f) rules))]
         [(EIf _ _ g t e) `(#:if ,(rec g) ,(rec t) ,(rec e))]
         [(EExtend _ _ m tag k v)
@@ -264,6 +265,7 @@ term template
     [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct k lm imp)]
     [(EAlloc sy _ tag) (EAlloc sy ct tag)]
     [(ELet sy _ bus body) (ELet sy ct bus body)]
+    [(ELetrec sy _ mfs body) (ELetrec sy ct mfs body)]
     [(EMatch sy _ de rules) (EMatch sy ct de rules)]
     [(EIf sy _ g t e) (EIf sy g t e)]
     [(EExtend sy _ m tag k v) (EExtend sy ct m tag k v)]
@@ -302,6 +304,7 @@ term template
 ;;       It exists to change the default deref behavior.
 (struct EAlloc Expression (tag) #:transparent) ;; space mm em in type
 (struct ELet Expression (bus body) #:transparent)
+(struct ELetrec Expression (mfs body) #:transparent) ;; Local metafunctions
 (struct EMatch Expression (discriminant rules) #:transparent)
 (struct EIf Expression (g t e) #:transparent)
 (struct EExternal Expression (v) #:transparent)
@@ -332,6 +335,7 @@ expr template
     [(EStore-lookup sy ct k lm imp) ???]
     [(EAlloc sy ct tag) ???]
     [(ELet sy ct bus body) ???]
+    [(ELetrec sy ct mfs body) ???]
     [(EMatch sy ct de rules) ???]
     [(EIf sy ct g t e) ???]
     [(EExtend sy ct m tag k v) ???]
@@ -364,7 +368,7 @@ expr template
       (ECall _ ct mf τs es1))
      (equal*? es0 es1)]
     [((EVariant _ ct n tag τs es0)
-      (EVariant _ ct n tag τs es1))
+      (EVariant _ ct n tag τs es1)) ;; SAME NAME ONLY
      (equal*? es0 es1)]
     [((ERef _ ct x) (ERef _ ct y))
      (eq? (hash-ref ρ0 x x)
@@ -376,6 +380,9 @@ expr template
     [((ELet _ ct bus0 body0) (ELet _ ct bus1 body1))
      (define-values (ρ0* ρ1* r) (bus-α-equal? bus0 bus1 ρ0 ρ1))
      (and r (expr-α-equal? body0 body1 ρ0* ρ1*))]
+    [((ELetrec _ ct mfs0 body0) (ELetrec _ ct mfs1 body1))
+     (and (mfs-α-equal? mfs0 mfs1 ρ0 ρ1)
+          (expr-α-equal? body0 body1 ρ0 ρ1))]
     [((EMatch _ ct de0 rules0) (EMatch _ ct de1 rules1))
      (and (expr-α-equal? de0 de1 ρ0 ρ1)
           (for/and ([rule0 (in-list rules0)]
@@ -429,6 +436,12 @@ expr template
     [(Unless _ e) `(#:unless ,(expr->sexp e))]
     [_ `(error$ ,(format "Unrecognized bu form: ~a" bu))]))
 
+(define (mf->sexp mf)
+  (match mf
+    [(Metafunction m τ rules)
+     `(m : ,(type->sexp τ) . ,(map rule->sexp rules))]
+    [_ `(error$ ,(format "Unrecognized mf form: ~a" mf))]))
+
 (define (bu-α-equal? bu0 bu1 ρ0 ρ1)
   (match* (bu0 bu1)
     [((Update _ k0 v0) (Update _ k1 v1))
@@ -451,6 +464,20 @@ expr template
       [r (bus-α-equal? bus0 bus1 ρ0* ρ1*)]
       [else (values ρ0* ρ1* #f)])]
     [(_ _) (values ρ0 ρ1 #f)]))
+
+(define (mf-α-equal? mf0 mf1 ρ0 ρ1)
+  (match-define (Metafunction name0 τ0 rules0) mf0)
+  (match-define (Metafunction name1 τ1 rules1) mf1)
+  (and (eq? name0 name1)
+       (equal? τ0 τ1)
+       (for/and ([r0 (in-list rules0)]
+                 [r1 (in-list rules1)])
+         (rule-α-equal? r0 r1 ρ0 ρ1))))
+
+(define (mfs-α-equal? mfs0 mfs1 ρ0 ρ1)
+  (for/and ([mf0 (in-list mfs0)]
+            [mf1 (in-list mfs1)])
+    (mf-α-equal? mf0 mf1 ρ0 ρ1)))
 
 (define (write-bu bu port mode)
   (display (bu->sexp bu) port))
@@ -531,8 +558,14 @@ expr template
 (define (abstract-frees-in-bus bus names)
   (for/list ([bu (in-list bus)]) (abstract-frees-in-bu bu names)))
 
+(define (abstract-frees-in-mfs mfs names)
+  (for/list ([mf (in-list mfs)]) (abstract-frees-in-mf mf names)))
+
 (define (open-scopes-in-bus bus substs)
   (for/list ([bu (in-list bus)]) (open-scopes-in-bu bu substs)))
+
+(define (open-scopes-in-mfs mfs substs)
+  (for/list ([mf (in-list mfs)]) (open-scopes-in-mf mf substs)))
 
 (define (abstract-frees-in-bu bu names)
   (match bu
@@ -559,6 +592,16 @@ expr template
             (open-scopes-in-expr e substs))]
     [(When sy e) (When sy (open-scopes-in-expr e substs))]
     [(Unless sy e) (Unless sy (open-scopes-in-expr e substs))]))
+
+(define (abstract-frees-in-mf mf names)
+  (match-define (Metafunction name τ rules) mf)
+  (Metafunction name
+                (abstract-frees τ names)
+                (abstract-frees-in-rules rules names)))
+
+(define (open-scopes-in-mf mf substs)
+  (match-define (Metafunction name τ rules) mf)
+  (Metafunction name (open-scopes τ substs) (open-scopes-in-rules rules substs)))
 
 (define (abstract-frees-in-ct ct names)
   (match ct
@@ -642,6 +685,7 @@ expr template
       [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
       [(ELet sy _ bus body) (ELet sy ct* (abstract-frees-in-bus bus names) (self body))]
+      [(ELetrec sy _ mfs body) (ELetrec sy ct* (abstract-frees-in-mfs mfs names) (self body))]
       [(EMatch sy _ de rules) (EMatch sy ct* (self de) (abstract-frees-in-rules-aux rules names))]
       [(EIf sy _ g t e) (EIf sy ct* (self g) (self t) (self e))]
       [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]
@@ -674,6 +718,7 @@ expr template
       [(EStore-lookup sy _ k lm imp) (EStore-lookup sy ct* (self k) lm imp)]
       [(EAlloc sy _ tag) (EAlloc sy ct* tag)]
       [(ELet sy _ bus body) (ELet sy ct* (open-scopes-in-bus bus substs) (self body))]
+      [(ELetrec sy _ mfs body) (ELetrec sy ct* (open-scopes-in-mfs mfs substs) (self body))]
       [(EMatch sy _ de rules) (EMatch sy ct* (self de) (open-scopes-in-rules-aux rules substs))]
       [(EIf sy _ g t e) (EIf sy ct* (self g) (self t) (self e))]
       [(EExtend sy _ m tag k v) (EExtend sy ct* (self m) tag (self k) (self v))]

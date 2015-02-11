@@ -1,5 +1,5 @@
 #lang racket/base
-(require "types.rkt" "subtype.rkt"
+(require "types.rkt" "subtype.rkt" "tc-ctxs.rkt"
          racket/match
          racket/set
          racket/trace
@@ -60,7 +60,7 @@ Example:
                [(and (< 0 (set-count self-seen))
                      ;; don't self-loop when checking subtyping relationship.
                      (parameterize ([heapifying? #f])
-                       (<:? self t*))) #t]
+                       (<:? (empty-ctx) self t*))) #t]
                [else
                 (set-add! self-seen t*)
                 (printf "~a ~a~%" self-seen t*)

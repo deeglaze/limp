@@ -22,7 +22,8 @@
          parse-expr
          TopPreType ClosedTopPreType
          Rule-cls
-         Expression-cls)
+         Expression-cls
+         Metafunction-cls)
 
 
 (module+ test (require rackunit))
@@ -475,6 +476,11 @@ single address space
                               (Typed-ct (attribute ebody.e)))
                           (attribute bus.bus)
                           (attribute ebody.e)))
+  (pattern (~and sy (#:letrec ~! [(~var mfs (Metafunction-cls L)) ...] ebody))
+           #:attr e (ELetrec #'sy
+                             (or ct (Typed-ct (attribute ebody.e)))
+                             (attribute mfs.mf)
+                             (attribute ebody.e)))
   (pattern (~and sy (#:match ~! edisc ~! rules ...))
            #:attr e (EMatch #'sy ct (attribute edisc.e)
                             (attribute rules.rule)))
@@ -882,32 +888,40 @@ Turn all free non-metavariables into external space names if they are bound.
   (syntax-parse stx
     [((~var r (Rule-cls #t L)) ...) (attribute r.rule)]))
 
+(define-syntax-class (Metafunction-cls L)
+  #:attributes (mf (ta 1))
+  ;; TODO: make type annotation optional (for local definitions only?)
+  (pattern (name:id (~datum :)
+                    (~do (define options (Language-options L))
+                         (define unames (Language-user-spaces L))
+                         (define enames (Language-external-spaces L))
+                         (define meta-table (Language-meta-table L)))
+                    (~and
+                     arrty
+                     ((~optional (~seq (~or #:Λ #:∀ #:all) (ta:id ...)) #:defaults ([(ta 1) '()]))
+                      (~var formals (TopPreType options unames enames meta-table))
+                      ... (~or (~datum ->) (~datum →)) ~!
+                      (~var ret (TopPreType options unames enames meta-table))))
+                    ~!
+                    (~var r (Rule-cls #f L)) ...)
+           #:do [(define type-names (rev-map syntax-e (attribute ta)))]
+           #:attr mf
+           (Metafunction (syntax-e #'name)
+                         (quantify-frees
+                          (mk-TArrow #'arrty
+                                     (mk-TVariant #'(formals ...)
+                                                  (syntax-e #'name)
+                                                  (attribute formals.t)
+                                                  'untrusted)
+                                     (attribute ret.t))
+                          type-names)
+                         ;; There will be as many scopes on the rules as type quants
+                         ;; in the mf type.
+                         (abstract-frees-in-rules (attribute r.rule) type-names))))
+
 (define (parse-metafunction stx [L (current-language)])
   (syntax-parse stx
-    [(name:id (~datum :)
-              (~do (define options (Language-options L))
-                   (define unames (Language-user-spaces L))
-                   (define enames (Language-external-spaces L))
-                   (define meta-table (Language-meta-table L)))
-              (~and
-               arrty
-               ((~optional (~seq (~or #:Λ #:∀ #:all) (ta:id ...)) #:defaults ([(ta 1) '()]))
-                (~var formals (TopPreType options unames enames meta-table))
-                ... (~or (~datum ->) (~datum →)) ~!
-                (~var ret (TopPreType options unames enames meta-table))))
-              ~!
-              (~var r (Rule-cls #f L)) ...)
-     (define type-names (rev-map syntax-e (attribute ta)))
-     ;; TODO: check that rules' patterns match (name args ...) for the type of name.
-     (Metafunction (syntax-e #'name)
-                   (quantify-frees
-                    (mk-TArrow #'arrty
-                     (mk-TVariant #'(formals ...) (syntax-e #'name) (attribute formals.t) 'untrusted)
-                     (attribute ret.t))
-                    type-names)
-                   ;; There will be as many scopes on the rules as type quants
-                   ;; in the mf type.
-                   (abstract-frees-in-rules (attribute r.rule) type-names))]))
+    [(~var mf (Metafunction-cls L)) (attribute mf.mf)]))
 
 (define (parse-type stx [unames ∅] [enames ∅] [meta-table #hasheq()] #:use-lang? [use-lang? #f])
   (define-values (unames* enames* meta-table*)
